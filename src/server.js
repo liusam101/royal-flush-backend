@@ -13,7 +13,13 @@ const adminRouter                       = require('./adminRoutes');
 
 const app    = express();
 const server = http.createServer(app);
-const io     = new Server(server, { cors: { origin: '*', methods: ['GET','POST','DELETE'] } });
+const io     = new Server(server, {
+  cors: {
+    origin: ['https://royal-flush-frontend.vercel.app', 'http://localhost:3000'],
+    methods: ['GET','POST','DELETE'],
+    credentials: true,
+  }
+});
 
 app.use(cors());
 app.use(express.json());
