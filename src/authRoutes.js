@@ -123,4 +123,35 @@ router.post('/ban', async (req, res) => {
   catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
+// ── Responsible Gambling ────────────────────────────────────────────────────
+const rg = require('./responsibleGambling');
+
+router.get('/rg', authMiddleware, (req, res) => {
+  try { res.json({ ok: true, rg: rg.getRGStatus(req.user.id) }); }
+  catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/rg/limits', authMiddleware, (req, res) => {
+  try {
+    const result = rg.setLimits(req.user.id, req.body);
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/rg/self-exclude', authMiddleware, (req, res) => {
+  try {
+    const { days } = req.body; // null = permanent, number = days
+    const result = rg.selfExclude(req.user.id, days || null);
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/rg/cooloff', authMiddleware, (req, res) => {
+  try {
+    const { hours = 24 } = req.body;
+    const result = rg.setCooloff(req.user.id, Math.min(hours, 168)); // max 1 week
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
 module.exports = router;
