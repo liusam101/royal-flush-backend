@@ -40,14 +40,29 @@ function saveUsers(u) {
 // ── Shared helpers ─────────────────────────────────────────────────────────
 function safeUser(u) {
   return {
-    id:        u.id,
-    username:  u.username,
-    email:     u.email,
-    chips:     parseFloat(u.chips || u.chips_royal || 10),
-    goldChips: parseInt(u.gold_chips || u.goldChips || 250000),
-    createdAt: parseInt(u.created_at || u.createdAt || Date.now()),
-    lastLogin: parseInt(u.last_login || u.lastLogin || Date.now()),
-    banned:    !!u.banned,
+    id:            u.id,
+    username:      u.username,
+    email:         u.email,
+    chips:         parseFloat(u.chips || u.chips_royal || 10),
+    goldChips:     parseInt(u.gold_chips || u.goldChips || 250000),
+    createdAt:     parseInt(u.created_at || u.createdAt || Date.now()),
+    lastLogin:     parseInt(u.last_login || u.lastLogin || Date.now()),
+    banned:        !!u.banned,
+    emailVerified: !!(u.email_verified || u.emailVerified),
+    stats: {
+      handsPlayed:   parseInt(u.hands_played   || u.handsPlayed   || 0),
+      handsWon:      parseInt(u.hands_won      || u.handsWon      || 0),
+      totalWon:      parseFloat(u.total_won    || u.totalWon      || 0),
+      totalLost:     parseFloat(u.total_lost   || u.totalLost     || 0),
+      vpip:          u.vpip_total > 0 ? parseFloat((u.vpip_count/u.vpip_total*100).toFixed(1)) :
+                     u.vpipTotal  > 0 ? parseFloat((u.vpipCount /u.vpipTotal *100).toFixed(1)) : 0,
+      pfr:           u.pfr_total  > 0 ? parseFloat((u.pfr_count /u.pfr_total *100).toFixed(1)) :
+                     u.pfrTotal   > 0 ? parseFloat((u.pfrCount  /u.pfrTotal  *100).toFixed(1)) : 0,
+      showdownWinRate: u.showdown_total > 0 ? parseFloat((u.showdown_wins/u.showdown_total*100).toFixed(1)) :
+                       u.showdownTotal  > 0 ? parseFloat((u.showdownWins/u.showdownTotal *100).toFixed(1)) : 0,
+      showdownWins:  parseInt(u.showdown_wins  || u.showdownWins  || 0),
+      showdownTotal: parseInt(u.showdown_total || u.showdownTotal || 0),
+    }
   };
 }
 
@@ -88,8 +103,9 @@ async function register({ username, email, password }) {
       return { ok: false, error: byName ? 'Username already taken.' : 'Email already registered.' };
     }
     const row = await db.queryOne(
-      `INSERT INTO users (id,username,email,password_hash,chips,gold_chips,created_at,last_login,banned)
-       VALUES ($1,$2,$3,$4,10.00,250000,$5,$5,false) RETURNING *`,
+      `INSERT INTO users (id,username,email,password_hash,chips,gold_chips,created_at,last_login,banned,
+        email_verified,hands_played,hands_won,total_won,total_lost,vpip_count,vpip_total,pfr_count,pfr_total,showdown_wins,showdown_total)
+       VALUES ($1,$2,$3,$4,10.00,250000,$5,$5,false,false,0,0,0,0,0,0,0,0,0,0) RETURNING *`,
       [id, username, email.toLowerCase(), hash, now]
     );
     const token = makeToken(row.id, row.username);
@@ -101,7 +117,10 @@ async function register({ username, email, password }) {
     if (Object.values(users).find(u=>u.email===email.toLowerCase()))
       return { ok: false, error: 'Email already registered.' };
     users[id] = { id, username, email: email.toLowerCase(), passwordHash: hash,
-                  chips: 10, goldChips: 250000, createdAt: now, lastLogin: now, banned: false };
+                  chips: 10, goldChips: 250000, createdAt: now, lastLogin: now, banned: false,
+                  emailVerified: false, handsPlayed: 0, handsWon: 0,
+                  totalWon: 0, totalLost: 0, vpipCount: 0, vpipTotal: 0,
+                  pfrCount: 0, pfrTotal: 0, showdownWins: 0, showdownTotal: 0 };
     saveUsers(users);
     return { ok: true, token: makeToken(id, username), user: safeUser(users[id]) };
   }
@@ -220,6 +239,67 @@ async function getAllUsers() {
   return Object.values(loadUsers()).map(safeUser);
 }
 
+// ── Email verification ────────────────────────────────────────────────────
+async function verifyEmail(userId) {
+  if (useDB) {
+    await db.query('UPDATE users SET email_verified=true WHERE id=$1', [userId]);
+  } else {
+    const users = loadUsers();
+    if (users[userId]) { users[userId].emailVerified = true; saveUsers(users); }
+  }
+}
+
+// ── Password reset ────────────────────────────────────────────────────────
+async function resetPassword(userId, newPassword) {
+  if (newPassword.length < 6) return { ok: false, error: 'Password must be at least 6 characters.' };
+  const hash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  if (useDB) {
+    await db.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, userId]);
+  } else {
+    const users = loadUsers();
+    if (users[userId]) { users[userId].passwordHash = hash; saveUsers(users); }
+  }
+  return { ok: true };
+}
+
+// ── Stats update ──────────────────────────────────────────────────────────
+async function updateStats(userId, stats) {
+  // stats: { handPlayed, won, amountWon, amountLost, vpip, pfr, showdownWin, showdownPlayed }
+  if (useDB) {
+    await db.query(`UPDATE users SET
+      hands_played   = hands_played   + $1,
+      hands_won      = hands_won      + $2,
+      total_won      = total_won      + $3,
+      total_lost     = total_lost     + $4,
+      vpip_count     = vpip_count     + $5,
+      vpip_total     = vpip_total     + $6,
+      pfr_count      = pfr_count      + $7,
+      pfr_total      = pfr_total      + $8,
+      showdown_wins  = showdown_wins  + $9,
+      showdown_total = showdown_total + $10
+      WHERE id=$11`,
+      [stats.handPlayed||0, stats.won||0, stats.amountWon||0, stats.amountLost||0,
+       stats.vpip||0, stats.pfr?1:0||0, stats.pfr||0, stats.pfr?1:0||0,
+       stats.showdownWin||0, stats.showdownPlayed||0, userId]);
+  } else {
+    const users = loadUsers();
+    const u = users[userId];
+    if (u) {
+      u.handsPlayed   = (u.handsPlayed  ||0) + (stats.handPlayed||0);
+      u.handsWon      = (u.handsWon     ||0) + (stats.won||0);
+      u.totalWon      = (u.totalWon     ||0) + (stats.amountWon||0);
+      u.totalLost     = (u.totalLost    ||0) + (stats.amountLost||0);
+      u.vpipCount     = (u.vpipCount    ||0) + (stats.vpip||0);
+      u.vpipTotal     = (u.vpipTotal    ||0) + (stats.handPlayed||0);
+      u.pfrCount      = (u.pfrCount     ||0) + (stats.pfr||0);
+      u.pfrTotal      = (u.pfrTotal     ||0) + (stats.handPlayed||0);
+      u.showdownWins  = (u.showdownWins ||0) + (stats.showdownWin||0);
+      u.showdownTotal = (u.showdownTotal||0) + (stats.showdownPlayed||0);
+      saveUsers(users);
+    }
+  }
+}
+
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer '))
@@ -232,5 +312,6 @@ function authMiddleware(req, res, next) {
 
 module.exports = {
   initAuth, register, login, verifyToken, verifyTokenAsync,
-  getUser, updateChips, banUser, getAllUsers, authMiddleware, JWT_SECRET
+  getUser, updateChips, banUser, getAllUsers, authMiddleware,
+  verifyEmail, resetPassword, updateStats, JWT_SECRET
 };

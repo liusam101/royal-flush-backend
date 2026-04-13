@@ -45,16 +45,39 @@ async function initDB() {
   try {
     await p.query(`
       CREATE TABLE IF NOT EXISTS users (
-        id            TEXT PRIMARY KEY,
-        username      TEXT UNIQUE NOT NULL,
-        email         TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        chips         NUMERIC(12,2) DEFAULT 10.00,
-        gold_chips    BIGINT DEFAULT 250000,
-        created_at    BIGINT NOT NULL,
-        last_login    BIGINT NOT NULL,
-        banned        BOOLEAN DEFAULT FALSE
+        id             TEXT PRIMARY KEY,
+        username       TEXT UNIQUE NOT NULL,
+        email          TEXT UNIQUE NOT NULL,
+        password_hash  TEXT NOT NULL,
+        chips          NUMERIC(12,2) DEFAULT 10.00,
+        gold_chips     BIGINT DEFAULT 250000,
+        created_at     BIGINT NOT NULL,
+        last_login     BIGINT NOT NULL,
+        banned         BOOLEAN DEFAULT FALSE,
+        email_verified BOOLEAN DEFAULT FALSE,
+        hands_played   INT DEFAULT 0,
+        hands_won      INT DEFAULT 0,
+        total_won      NUMERIC(12,2) DEFAULT 0,
+        total_lost     NUMERIC(12,2) DEFAULT 0,
+        vpip_count     INT DEFAULT 0,
+        vpip_total     INT DEFAULT 0,
+        pfr_count      INT DEFAULT 0,
+        pfr_total      INT DEFAULT 0,
+        showdown_wins  INT DEFAULT 0,
+        showdown_total INT DEFAULT 0
       );
+      -- Add stats columns to existing tables (safe if already exist)
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS hands_played   INT DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS hands_won      INT DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS total_won      NUMERIC(12,2) DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS total_lost     NUMERIC(12,2) DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS vpip_count     INT DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS vpip_total     INT DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS pfr_count      INT DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS pfr_total      INT DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS showdown_wins  INT DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS showdown_total INT DEFAULT 0;
 
       CREATE TABLE IF NOT EXISTS sessions (
         token      TEXT PRIMARY KEY,
