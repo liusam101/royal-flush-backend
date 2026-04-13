@@ -11,7 +11,7 @@ const { analyzeInteractionSignature }   = require('./botDetection');
 const handHistory                       = require('./handHistory');
 const adminRouter                       = require('./adminRoutes');
 const authRouter                        = require('./authRoutes');
-const { verifyToken, updateChips }      = require('./auth');
+const { verifyToken, updateChips, updateStats } = require('./auth');
 
 const app    = express();
 const server = http.createServer(app);
@@ -176,17 +176,27 @@ io.on('connection', (socket) => {
       io.to(tableId).emit('handResult', hr);
       // Hand history: close hand record
       handHistory.endHand(tableId, hr);
-      // Sync chip balance back to DB for authenticated players
+      // Sync chip balance + stats back to DB for authenticated players
       const finalState = tableManager.getTableState(tableId);
       if (finalState?.seats) {
         for (const seat of finalState.seats) {
           const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
           if (skt?.userId) {
-            const delta = seat.stack - (skt.chips || 0);
+            const isWinner = hr?.winner === seat.name;
+            const delta    = seat.stack - (skt.chips || 0);
             if (Math.abs(delta) > 0.001) {
               await updateChips(skt.userId, delta, 0);
               skt.chips = seat.stack;
             }
+            // Track hand stats
+            await updateStats(skt.userId, {
+              handPlayed:      1,
+              won:             isWinner ? 1 : 0,
+              amountWon:       isWinner ? (hr?.amount || 0) : 0,
+              amountLost:      !isWinner ? Math.abs(delta < 0 ? delta : 0) : 0,
+              showdownWin:     isWinner && hr?.showCards?.length > 0 ? 1 : 0,
+              showdownPlayed:  hr?.showCards?.length > 0 ? 1 : 0,
+            }).catch(e => console.error('[Stats] update error:', e.message));
           }
         }
       }
