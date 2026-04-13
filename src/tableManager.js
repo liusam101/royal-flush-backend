@@ -99,6 +99,31 @@ const tableManager = {
     if (tables[tableId]) tables[tableId]._onAutoFold = cb;
   },
 
+  // Create a new dynamic table (for SNGs/tournaments)
+  createTable(tableId, { name, sb, bb, maxSeats, isTournament=false }) {
+    if (tables[tableId]) return; // already exists
+    tables[tableId] = {
+      id: tableId, name, sb, bb, maxSeats,
+      seats: [], engine: new GameEngine(sb, bb),
+      phase: 'waiting', pot: 0, sidePots: [], board: [],
+      actIdx: 0, dealerIdx: 0, isTournament,
+      lastRaiseSize: 0, bbIdx: 0, preflopBBActed: false, actionsThisRound: 0, roundStartIdx: -1,
+    };
+  },
+
+  // Update blinds (for tournament blind levels)
+  updateBlinds(tableId, sb, bb) {
+    const t = tables[tableId];
+    if (!t) return;
+    t.sb = sb; t.bb = bb;
+    t.engine = new GameEngine(sb, bb);
+  },
+
+  // Remove a table
+  removeTable(tableId) {
+    delete tables[tableId];
+  },
+
   getTableList() {
     return Object.values(tables).map(t => ({
       id: t.id, name: t.name, sb: t.sb, bb: t.bb,
