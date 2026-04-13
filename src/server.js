@@ -23,7 +23,10 @@ const io     = new Server(server, {
   }
 });
 
-app.use(cors());
+app.use(cors({
+  origin: ['https://royal-flush-frontend.vercel.app', 'http://localhost:3000', 'http://localhost:3001'],
+  credentials: true,
+}));
 app.use(express.json());
 
 // Inject io into admin routes
