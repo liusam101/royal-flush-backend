@@ -10,6 +10,8 @@ const { antiCheat }                     = require('./antiCheat');
 const { analyzeInteractionSignature }   = require('./botDetection');
 const handHistory                       = require('./handHistory');
 const adminRouter                       = require('./adminRoutes');
+const authRouter                        = require('./authRoutes');
+const { verifyToken, updateChips }      = require('./auth');
 
 const app    = express();
 const server = http.createServer(app);
@@ -27,6 +29,7 @@ app.use(express.json());
 // Inject io into admin routes
 app.use((req,_,next)=>{ req.io=io; next(); });
 app.use('/admin', adminRouter);
+app.use('/api/auth', authRouter);
 
 app.get('/', (req, res) => {
   res.json({ status: 'Royal Flush backend running', tables: tableManager.getTableList() });
@@ -56,6 +59,18 @@ function tryStartNewHand(tableId) {
 // ── Socket events ─────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log(`[+] ${socket.id}`);
+
+  // Verify JWT token on socket connect (optional — player can still join as guest)
+  const token = socket.handshake.auth?.token;
+  if (token) {
+    const user = verifyToken(token);
+    if (user) {
+      socket.userId   = user.id;
+      socket.username = user.username;
+      socket.chips    = user.chips;
+      console.log(`    Auth: ${user.username} (${user.id})`);
+    }
+  }
 
   // ── Cash game ──────────────────────────────────────────────────
   socket.on('joinTable', (data) => {
@@ -104,7 +119,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('playerAction', ({ tableId, action, amount, signals }) => {
+  socket.on('playerAction', async ({ tableId, action, amount, signals }) => {
     // Anti-cheat: track action timing and context
     const preState = tableManager.getTableState(tableId);
     const mySeat   = preState?.seats?.find(s => s.socketId === socket.id);
@@ -158,6 +173,20 @@ io.on('connection', (socket) => {
       io.to(tableId).emit('handResult', hr);
       // Hand history: close hand record
       handHistory.endHand(tableId, hr);
+      // Sync chip balance back to DB for authenticated players
+      const finalState = tableManager.getTableState(tableId);
+      if (finalState?.seats) {
+        for (const seat of finalState.seats) {
+          const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
+          if (skt?.userId) {
+            const delta = seat.stack - (skt.chips || 0);
+            if (Math.abs(delta) > 0.001) {
+              await updateChips(skt.userId, delta, 0);
+              skt.chips = seat.stack;
+            }
+          }
+        }
+      }
       setTimeout(() => tryStartNewHand(tableId), 3500);
     }
   });
@@ -331,5 +360,9 @@ antiCheat.on('alert', (alert) => {
   }
 });
 
+const { initAuth } = require('./auth');
+
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`Royal Flush backend :${PORT}`));
+initAuth().then(() => {
+  server.listen(PORT, () => console.log(`Royal Flush backend :${PORT}`));
+});
