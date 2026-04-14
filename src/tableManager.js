@@ -130,27 +130,11 @@ const tableManager = {
       .map(t => ({
         id: t.id, name: t.name, sb: t.sb, bb: t.bb,
         players: t.seats.length, maxSeats: t.maxSeats,
-        waiting: (t.waitingList || []).length,
         rakeCollected: t._rakeCollected || 0,
       }));
   },
 
-  onWaitlistSeat(tableId, cb) {
-    if (tables[tableId]) tables[tableId]._onWaitlistSeat = cb;
-  },
 
-  getWaitlistPosition(tableId, socketId) {
-    const t = tables[tableId];
-    if (!t || !t.waitingList) return -1;
-    const idx = t.waitingList.findIndex(w => w.socketId === socketId);
-    return idx === -1 ? -1 : idx + 1;
-  },
-
-  removeFromWaitlist(tableId, socketId) {
-    const t = tables[tableId];
-    if (!t || !t.waitingList) return;
-    t.waitingList = t.waitingList.filter(w => w.socketId !== socketId);
-  },
 
   getTotalRake() {
     return Object.values(tables).reduce((sum, t) => sum + (t._rakeCollected || 0), 0);
@@ -163,6 +147,7 @@ const tableManager = {
     const inProgress = t.phase !== 'waiting' && t.phase !== 'starting';
     return {
       id: t.id, name: t.name, phase: t.phase, pot: t.pot,
+      sb: t.sb, bb: t.bb, maxSeats: t.maxSeats,
       board: t.board, sidePots: t.sidePots || [],
       seats: t.seats.map((s, i) => ({
         seat:     s.seat,
@@ -188,12 +173,7 @@ const tableManager = {
     const existing = t.seats.find(s => s.socketId === socketId);
     if (existing) return { ok: true, seat: existing.seat, cards: existing.cards, alreadyJoined: true, willStartHand: false };
     if (t.seats.length >= t.maxSeats) {
-      // Add to waiting list
-      if (!t.waitingList) t.waitingList = [];
-      const alreadyWaiting = t.waitingList.find(w => w.socketId === socketId);
-      if (alreadyWaiting) return { ok: false, error: 'Already on waiting list' };
-      t.waitingList.push({ socketId, name: playerName, buyIn, joinedAt: Date.now() });
-      return { ok: false, error: 'Table is full', waitlisted: true, position: t.waitingList.length };
+      return { ok: false, error: 'Table is full', tableFull: true };
     }
     if (buyIn < t.bb * 20) return { ok: false, error: `Min buy-in is $${t.bb * 20}` };
 
@@ -214,18 +194,7 @@ const tableManager = {
   leaveTable(tableId, socketId) {
     const t = tables[tableId];
     if (!t) return;
-    // Seat next player from waiting list
-    setTimeout(() => {
-      const tbl = tables[tableId];
-      if (!tbl || !tbl.waitingList?.length) return;
-      const next = tbl.waitingList.shift();
-      if (!next) return;
-      const result = tableManager.joinTable(tableId, next.socketId, next.name, next.buyIn);
-      if (result.ok) {
-        // Notify via callback if set
-        if (tbl._onWaitlistSeat) tbl._onWaitlistSeat(next.socketId, tableId, result.seat);
-      }
-    }, 1000);
+    // No waiting list — new tables spawn automatically when full
 
     // If hand is in progress and there's a pot, award it to remaining player
     const inProgress = t.phase !== 'waiting' && t.phase !== 'starting';
