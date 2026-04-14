@@ -125,10 +125,35 @@ const tableManager = {
   },
 
   getTableList() {
-    return Object.values(tables).map(t => ({
-      id: t.id, name: t.name, sb: t.sb, bb: t.bb,
-      players: t.seats.length, maxSeats: t.maxSeats,
-    }));
+    return Object.values(tables)
+      .filter(t => !t.isTournament)
+      .map(t => ({
+        id: t.id, name: t.name, sb: t.sb, bb: t.bb,
+        players: t.seats.length, maxSeats: t.maxSeats,
+        waiting: (t.waitingList || []).length,
+        rakeCollected: t._rakeCollected || 0,
+      }));
+  },
+
+  onWaitlistSeat(tableId, cb) {
+    if (tables[tableId]) tables[tableId]._onWaitlistSeat = cb;
+  },
+
+  getWaitlistPosition(tableId, socketId) {
+    const t = tables[tableId];
+    if (!t || !t.waitingList) return -1;
+    const idx = t.waitingList.findIndex(w => w.socketId === socketId);
+    return idx === -1 ? -1 : idx + 1;
+  },
+
+  removeFromWaitlist(tableId, socketId) {
+    const t = tables[tableId];
+    if (!t || !t.waitingList) return;
+    t.waitingList = t.waitingList.filter(w => w.socketId !== socketId);
+  },
+
+  getTotalRake() {
+    return Object.values(tables).reduce((sum, t) => sum + (t._rakeCollected || 0), 0);
   },
 
   getTableState(tableId) {
@@ -162,7 +187,14 @@ const tableManager = {
     if (!t) return { ok: false, error: 'Table not found' };
     const existing = t.seats.find(s => s.socketId === socketId);
     if (existing) return { ok: true, seat: existing.seat, cards: existing.cards, alreadyJoined: true, willStartHand: false };
-    if (t.seats.length >= t.maxSeats) return { ok: false, error: 'Table is full' };
+    if (t.seats.length >= t.maxSeats) {
+      // Add to waiting list
+      if (!t.waitingList) t.waitingList = [];
+      const alreadyWaiting = t.waitingList.find(w => w.socketId === socketId);
+      if (alreadyWaiting) return { ok: false, error: 'Already on waiting list' };
+      t.waitingList.push({ socketId, name: playerName, buyIn, joinedAt: Date.now() });
+      return { ok: false, error: 'Table is full', waitlisted: true, position: t.waitingList.length };
+    }
     if (buyIn < t.bb * 20) return { ok: false, error: `Min buy-in is $${t.bb * 20}` };
 
     const seatIdx = t.seats.length;
@@ -182,6 +214,18 @@ const tableManager = {
   leaveTable(tableId, socketId) {
     const t = tables[tableId];
     if (!t) return;
+    // Seat next player from waiting list
+    setTimeout(() => {
+      const tbl = tables[tableId];
+      if (!tbl || !tbl.waitingList?.length) return;
+      const next = tbl.waitingList.shift();
+      if (!next) return;
+      const result = tableManager.joinTable(tableId, next.socketId, next.name, next.buyIn);
+      if (result.ok) {
+        // Notify via callback if set
+        if (tbl._onWaitlistSeat) tbl._onWaitlistSeat(next.socketId, tableId, result.seat);
+      }
+    }, 1000);
 
     // If hand is in progress and there's a pot, award it to remaining player
     const inProgress = t.phase !== 'waiting' && t.phase !== 'starting';
@@ -288,8 +332,14 @@ const tableManager = {
     // Only one active player left → wins immediately
     const active = t.seats.filter(s => !s.folded);
     if (active.length === 1) {
-      active[0].stack += t.pot;
-      const handResult = { winner: active[0].name, amount: t.pot, reason: 'others folded' };
+      // Rake on fold wins too (but only if pot is big enough)
+      let foldRake = 0;
+      if (!t.isTournament && t.pot >= 1) {
+        foldRake = Math.min(Math.round(t.pot * 0.025 * 100) / 100, 3.00);
+        t._rakeCollected = (t._rakeCollected || 0) + foldRake;
+      }
+      active[0].stack += (t.pot - foldRake);
+      const handResult = { winner: active[0].name, amount: t.pot - foldRake, rake: foldRake, reason: 'others folded' };
       this._resetHand(tableId);
       return { ok: true, handOver: true, handResult };
     }
@@ -359,8 +409,16 @@ const tableManager = {
       const winner = active.find(s => s.name === result.winner);
       if (winner) winner.stack += totalPot;
       // Include all players' hole cards so clients can flip them at showdown
+      // ── Rake: 2.5% of pot, capped at $3 (exempt: tournaments, pots < $1)
+      let rake = 0;
+      if (!t.isTournament && totalPot >= 1) {
+        rake = Math.min(Math.round(totalPot * 0.025 * 100) / 100, 3.00);
+        // Deduct rake from winner's share
+        active[0].stack = Math.max(0, active[0].stack - rake);
+        t._rakeCollected = (t._rakeCollected || 0) + rake;
+      }
       const showCards = active.map(s => ({ name: s.name, cards: s.cards }));
-      const handResult = { winner: result.winner, hand: result.hand, amount: totalPot, board: t.board, showCards };
+      const handResult = { winner: result.winner, hand: result.hand, amount: totalPot - rake, rake, board: t.board, showCards };
       this._resetHand(tableId);
       return handResult;
     }
