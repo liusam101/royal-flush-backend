@@ -154,4 +154,95 @@ router.post('/rg/cooloff', authMiddleware, (req, res) => {
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
+// ── Social features ──────────────────────────────────────────────────────
+const social = require('./socialFeatures');
+const { getAllUsers: getAll } = require('./auth');
+
+// Sessions
+router.get('/sessions', authMiddleware, (req, res) => {
+  try { res.json({ ok: true, sessions: social.getUserSessions(req.user.id) }); }
+  catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/sessions/start', authMiddleware, (req, res) => {
+  try {
+    const id = social.startUserSession(req.user.id, req.body);
+    res.json({ ok: true, sessionId: id });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/sessions/end', authMiddleware, (req, res) => {
+  try {
+    social.endUserSession(req.user.id, req.body.sessionId, req.body);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Achievements
+router.get('/achievements', authMiddleware, (req, res) => {
+  try { res.json({ ok: true, achievements: social.getUserAchievements(req.user.id) }); }
+  catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Friends
+router.get('/friends', authMiddleware, async (req, res) => {
+  try {
+    const friendIds = social.getFriends(req.user.id);
+    const allUsers  = await getAll();
+    const friends   = friendIds.map(id => {
+      const u = allUsers.find(u => u.id === id);
+      return u ? { id: u.id, username: u.username, stats: u.stats } : null;
+    }).filter(Boolean);
+    res.json({ ok: true, friends });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/friends/add', authMiddleware, async (req, res) => {
+  try {
+    const { username } = req.body;
+    if (!username) return res.status(400).json({ error: 'Username required' });
+    const allUsers = await getAll();
+    const friend   = allUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
+    if (!friend) return res.status(404).json({ error: 'Player not found' });
+    if (friend.id === req.user.id) return res.status(400).json({ error: "Can't add yourself" });
+    const result = social.addFriend(req.user.id, friend.id);
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ok: true, friend: { id: friend.id, username: friend.username } });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/friends/remove', authMiddleware, async (req, res) => {
+  try {
+    const { friendId } = req.body;
+    social.removeFriend(req.user.id, friendId);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Avatar
+router.post('/avatar', authMiddleware, (req, res) => {
+  try {
+    const { image } = req.body;
+    const result = social.saveAvatar(req.user.id, image);
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+router.get('/avatar/:userId', async (req, res) => {
+  try {
+    const avatar = social.getAvatar(req.params.userId);
+    res.json({ ok: true, avatar });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Avatar batch fetch
+router.post('/avatars', async (req, res) => {
+  try {
+    const { userIds } = req.body;
+    if (!Array.isArray(userIds)) return res.status(400).json({ error: 'userIds required' });
+    res.json({ ok: true, avatars: social.getAvatars(userIds.slice(0, 50)) });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
 module.exports = router;
