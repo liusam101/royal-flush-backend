@@ -250,7 +250,7 @@ router.post('/avatars', async (req, res) => {
 
 // ── Daily Login Bonus ──────────────────────────────────────────────────────
 const BONUS_FILE = path.join(__dirname, '../../data/daily_bonus.json');
-const DAY_REWARDS = [500, 750, 1000, 1250, 1500, 2000, 5000];
+const DAILY_GOLD = 1250; // flat daily Gold Chip bonus
 
 function loadBonus() {
   try { return JSON.parse(fs.readFileSync(BONUS_FILE,'utf8')); } catch(_) { return {}; }
@@ -264,17 +264,9 @@ router.get('/daily-bonus/status', authMiddleware, (req, res) => {
   try {
     const data   = loadBonus();
     const record = data[req.user.id] || {};
-    const now    = Date.now();
-    const lastClaim   = record.lastClaim || 0;
-    const daysSinceClaim = (now - lastClaim) / (1000 * 60 * 60 * 24);
-    const prevStreak  = record.streak || 0;
-    const today       = new Date().toDateString();
-    const claimed     = record.lastDay === today;
-    const curStreak   = daysSinceClaim > 2 && !claimed ? 0 : prevStreak;
-    const nextDay     = Math.min((curStreak % 7) + (claimed ? 0 : 1), 7);
-    const displayDay  = claimed ? Math.min(curStreak, 7) : nextDay;
-    const reward      = DAY_REWARDS[Math.min(nextDay - 1, 6)];
-    res.json({ ok: true, claimed, streak: curStreak, nextDay: displayDay, reward, rewards: DAY_REWARDS });
+    const today  = new Date().toDateString();
+    const claimed = record.lastDay === today;
+    res.json({ ok: true, claimed, reward: DAILY_GOLD });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -284,17 +276,10 @@ router.post('/daily-bonus/claim', authMiddleware, async (req, res) => {
     const record = data[req.user.id] || {};
     const today  = new Date().toDateString();
     if (record.lastDay === today) return res.status(400).json({ error: 'Already claimed today' });
-    const now = Date.now();
-    const lastClaim = record.lastClaim || 0;
-    const daysSinceClaim = (now - lastClaim) / (1000 * 60 * 60 * 24);
-    const prevStreak = record.streak || 0;
-    const newStreak  = daysSinceClaim > 2 ? 1 : prevStreak + 1;
-    const dayIdx     = Math.min((newStreak - 1) % 7, 6);
-    const reward     = DAY_REWARDS[dayIdx];
-    data[req.user.id] = { lastClaim: now, lastDay: today, streak: newStreak };
+    data[req.user.id] = { lastClaim: Date.now(), lastDay: today };
     saveBonus(data);
-    await updateChips(req.user.id, 0, reward).catch(()=>{});
-    res.json({ ok: true, streak: newStreak, reward, nextDay: Math.min((newStreak % 7) + 1, 7) });
+    await updateChips(req.user.id, 0, DAILY_GOLD).catch(()=>{});
+    res.json({ ok: true, reward: DAILY_GOLD });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
