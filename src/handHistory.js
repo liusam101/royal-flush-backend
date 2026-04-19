@@ -5,12 +5,13 @@
 const fs   = require('fs');
 const path = require('path');
 
-const HISTORY_DIR = path.join(__dirname, '../../data/hands');
-const INDEX_FILE  = path.join(__dirname, '../../data/hand_index.json');
+const BASE_DIR    = process.env.RAILWAY_ENVIRONMENT ? path.join('/tmp', 'rfdata') : path.join(__dirname, '../../data');
+const HISTORY_DIR = path.join(BASE_DIR, 'hands');
+const INDEX_FILE  = path.join(BASE_DIR, 'hand_index.json');
 const MAX_MEM     = 500; // keep last N hands in memory for fast lookup
 
 // Ensure data directory exists
-try { fs.mkdirSync(path.join(__dirname, '../../data'), { recursive: true }); } catch(_){}
+try { fs.mkdirSync(BASE_DIR,    { recursive: true }); } catch(_){}
 try { fs.mkdirSync(HISTORY_DIR, { recursive: true }); } catch(_){}
 
 let _handIndex = [];

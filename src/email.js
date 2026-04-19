@@ -9,7 +9,7 @@ const crypto     = require('crypto');
 // Token store — in production use Redis; JSON file for now
 const fs   = require('fs');
 const path = require('path');
-const DATA_DIR    = path.join(__dirname, '../../data');
+const DATA_DIR    = process.env.RAILWAY_ENVIRONMENT ? path.join('/tmp', 'rfdata') : path.join(__dirname, '../../data');
 const TOKENS_FILE = path.join(DATA_DIR, 'email_tokens.json');
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch(_) {}
 
@@ -17,7 +17,8 @@ function loadTokens() {
   try { return JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8')); } catch(_) { return {}; }
 }
 function saveTokens(t) {
-  fs.writeFileSync(TOKENS_FILE, JSON.stringify(t, null, 2));
+  try { fs.writeFileSync(TOKENS_FILE, JSON.stringify(t, null, 2)); }
+  catch(e) { console.error('[Email] saveTokens failed:', e.message); }
 }
 
 // ── SMTP transport ─────────────────────────────────────────────────────────

@@ -16,16 +16,16 @@ router.post('/register', async (req, res) => {
     if (acCheck.blocked) return res.status(403).json({ error: 'Registration not available.' });
     const result = await register({ username, email, password });
     if (!result.ok) return res.status(400).json({ error: result.error });
-    // Send verification email (non-blocking)
-    setTimeout(() => {
+    res.json({ ok: true, token: result.token, user: result.user });
+    // Send verification email after response, fully non-blocking
+    setImmediate(() => {
       try {
         sendVerificationEmail(result.user.id, result.user.email, result.user.username)
           .catch(e => console.error('[Email] Verify send failed:', e.message));
       } catch(e) {
         console.error('[Email] Verify setup failed:', e.message);
       }
-    }, 0);
-    res.json({ ok: true, token: result.token, user: result.user });
+    });
   } catch(e) { console.error('/register:', e); res.status(500).json({ error: 'Server error' }); }
 });
 
