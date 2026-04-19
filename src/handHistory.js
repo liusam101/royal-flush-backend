@@ -5,13 +5,15 @@
 const fs   = require('fs');
 const path = require('path');
 
-const BASE_DIR    = process.env.RAILWAY_ENVIRONMENT ? path.join('/tmp', 'rfdata') : path.join(__dirname, '../../data');
-const HISTORY_DIR = path.join(BASE_DIR, 'hands');
-const INDEX_FILE  = path.join(BASE_DIR, 'hand_index.json');
+const _DATA_BASE  = process.env.RAILWAY_ENVIRONMENT
+  ? require('path').join('/tmp', 'rfdata')
+  : path.join(__dirname, '../../data');
+const HISTORY_DIR = path.join(_DATA_BASE, 'hands');
+const INDEX_FILE  = path.join(_DATA_BASE, 'hand_index.json');
 const MAX_MEM     = 500; // keep last N hands in memory for fast lookup
 
 // Ensure data directory exists
-try { fs.mkdirSync(BASE_DIR,    { recursive: true }); } catch(_){}
+try { fs.mkdirSync(_DATA_BASE, { recursive: true }); } catch(_){}
 try { fs.mkdirSync(HISTORY_DIR, { recursive: true }); } catch(_){}
 
 let _handIndex = [];
@@ -108,7 +110,7 @@ function _persistHand(record) {
 }
 
 function _saveIndex() {
-  try { fs.writeFileSync(INDEX_FILE, JSON.stringify(_handIndex)); } catch(_){}
+  try { fs.writeFileSync(INDEX_FILE, JSON.stringify(_handIndex)); } catch(e){ console.error('[HandHistory] index save failed:', e.message); }
 }
 
 // ── Query API ──────────────────────────────────────────────────────────────

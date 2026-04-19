@@ -36,7 +36,8 @@ function loadUsers() {
   try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch(_) { return {}; }
 }
 function saveUsers(u) {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(u, null, 2));
+  try { fs.writeFileSync(USERS_FILE, JSON.stringify(u, null, 2)); }
+  catch(e) { console.error('[Auth] saveUsers failed:', e.message); }
 }
 
 // ── Shared helpers ─────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ function safeUser(u) {
     id:            u.id,
     username:      u.username,
     email:         u.email,
-    chips:         parseFloat(u.chips || u.chips_royal || 10),
+    chips:         parseFloat(u.chips != null ? u.chips : (u.chips_royal != null ? u.chips_royal : 10)),
     goldChips:     parseInt(u.gold_chips || u.goldChips || 250000),
     createdAt:     parseInt(u.created_at || u.createdAt || Date.now()),
     lastLogin:     parseInt(u.last_login || u.lastLogin || Date.now()),

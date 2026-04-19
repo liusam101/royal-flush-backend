@@ -11,7 +11,9 @@
 const fs   = require('fs');
 const path = require('path');
 
-const DATA_DIR = process.env.RAILWAY_ENVIRONMENT ? path.join('/tmp', 'rfdata') : path.join(__dirname, '../../data');
+const DATA_DIR = process.env.RAILWAY_ENVIRONMENT
+  ? require('path').join('/tmp', 'rfdata')
+  : path.join(__dirname, '../../data');
 const RG_FILE  = path.join(DATA_DIR, 'rg_limits.json');
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch(_) {}
 
@@ -21,7 +23,7 @@ function loadRG() {
 }
 function saveRG(data) {
   try { fs.writeFileSync(RG_FILE, JSON.stringify(data, null, 2)); }
-  catch(e) { console.error('[RG] saveRG failed:', e.message); }
+  catch(e) { console.error('[RG] save failed:', e.message); }
 }
 
 // ── Default limits ─────────────────────────────────────────────────────────

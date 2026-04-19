@@ -9,7 +9,9 @@ const crypto     = require('crypto');
 // Token store — in production use Redis; JSON file for now
 const fs   = require('fs');
 const path = require('path');
-const DATA_DIR    = process.env.RAILWAY_ENVIRONMENT ? path.join('/tmp', 'rfdata') : path.join(__dirname, '../../data');
+const DATA_DIR    = process.env.RAILWAY_ENVIRONMENT
+  ? path.join('/tmp', 'rfdata')
+  : path.join(__dirname, '../../data');
 const TOKENS_FILE = path.join(DATA_DIR, 'email_tokens.json');
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch(_) {}
 
@@ -59,7 +61,7 @@ function makeToken(type, userId, email) {
     if (tokens[k].userId === userId && tokens[k].type === type) delete tokens[k];
   });
   tokens[token] = { type, userId, email, createdAt: Date.now(), used: false };
-  saveTokens(tokens);
+  try { saveTokens(tokens); } catch(e) { console.error('[Email] token save failed:', e.message); }
   return token;
 }
 

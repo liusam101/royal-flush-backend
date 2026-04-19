@@ -15,7 +15,7 @@ function loadSocial() {
   try { return JSON.parse(fs.readFileSync(SOCIAL_FILE, 'utf8')); }
   catch(_) { return { friends: {}, sessions: {}, achievements: {}, avatars: {} }; }
 }
-function saveSocial(d) { fs.writeFileSync(SOCIAL_FILE, JSON.stringify(d, null, 2)); }
+function saveSocial(d) { try { fs.writeFileSync(SOCIAL_FILE, JSON.stringify(d, null, 2)); } catch(e) { console.error("[Social] save failed:", e.message); } }
 
 // ── ACHIEVEMENT DEFINITIONS ───────────────────────────────────────────────
 const ACHIEVEMENTS = [
