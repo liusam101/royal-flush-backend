@@ -26,7 +26,9 @@ async function initAuth() {
 }
 
 // ── JSON fallback (local dev) ──────────────────────────────────────────────
-const DATA_DIR   = path.join(__dirname, '../../data');
+const DATA_DIR   = process.env.RAILWAY_ENVIRONMENT
+  ? path.join('/tmp', 'rfdata')
+  : path.join(__dirname, '../../data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch(_) {}
 

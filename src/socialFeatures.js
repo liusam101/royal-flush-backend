@@ -4,7 +4,10 @@
 const fs   = require('fs');
 const path = require('path');
 
-const DATA_DIR = path.join(__dirname, '../../data');
+// Use /tmp on Railway (ephemeral but writable), local data dir otherwise
+const DATA_DIR = process.env.RAILWAY_ENVIRONMENT
+  ? path.join('/tmp', 'rfdata')
+  : path.join(__dirname, '../../data');
 const SOCIAL_FILE = path.join(DATA_DIR, 'social.json');
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch(_) {}
 

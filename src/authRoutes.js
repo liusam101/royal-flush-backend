@@ -249,15 +249,20 @@ router.post('/avatars', async (req, res) => {
 
 
 // ── Daily Login Bonus ──────────────────────────────────────────────────────
-const BONUS_FILE = path.join(__dirname, '../../data/daily_bonus.json');
+const _DATA_DIR  = process.env.RAILWAY_ENVIRONMENT
+  ? path.join('/tmp', 'rfdata')
+  : path.join(__dirname, '../../data');
+const BONUS_FILE = path.join(_DATA_DIR, 'daily_bonus.json');
 const DAILY_GOLD = 1250; // flat daily Gold Chip bonus
 
 function loadBonus() {
   try { return JSON.parse(fs.readFileSync(BONUS_FILE,'utf8')); } catch(_) { return {}; }
 }
 function saveBonus(d) {
-  try { fs.mkdirSync(path.dirname(BONUS_FILE),{recursive:true}); } catch(_){}
-  fs.writeFileSync(BONUS_FILE, JSON.stringify(d,null,2));
+  try {
+    fs.mkdirSync(path.dirname(BONUS_FILE),{recursive:true});
+    fs.writeFileSync(BONUS_FILE, JSON.stringify(d,null,2));
+  } catch(e) { console.error('[Bonus] save failed:', e.message); }
 }
 
 router.get('/daily-bonus/status', authMiddleware, (req, res) => {
