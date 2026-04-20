@@ -13,11 +13,9 @@ function makeDeck() {
   return deck;
 }
 
-const { secureRandInt } = require('./rng');
 function shuffle(deck) {
-  // Fisher-Yates with crypto.randomBytes() — no Math.random()
   for (let i = deck.length - 1; i > 0; i--) {
-    const j = secureRandInt(i + 1);
+    const j = Math.floor(Math.random() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
   }
   return deck;
@@ -104,14 +102,6 @@ class GameEngine {
     if (active.length === 0) return true;
     const maxBet = Math.max(...active.map(s => s.bet || 0));
     return active.every(s => (s.bet || 0) === maxBet);
-  }
-
-  bestFivePublic(cards7) {
-    return bestFive(cards7);
-  }
-
-  comparePublic(a, b) {
-    return compareScore(a, b);
   }
 
   showdown(seats, board) {
