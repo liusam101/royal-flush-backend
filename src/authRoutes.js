@@ -163,7 +163,6 @@ router.post('/rg/cooloff', authMiddleware, (req, res) => {
 
 // ── Social features ──────────────────────────────────────────────────────
 const social = require('./socialFeatures');
-const { getAllUsers: getAll } = require('./auth');
 
 // Sessions
 router.get('/sessions', authMiddleware, (req, res) => {
