@@ -16,9 +16,7 @@ router.post('/register', async (req, res) => {
     if (acCheck.blocked) return res.status(403).json({ error: 'Registration not available.' });
     const result = await register({ username, email, password });
     if (!result.ok) return res.status(400).json({ error: result.error });
-    // Respond immediately — email is truly fire-and-forget
     res.json({ ok: true, token: result.token, user: result.user });
-    // Send verification email after response (cannot crash registration)
     setImmediate(() => {
       try {
         sendVerificationEmail(result.user.id, result.user.email, result.user.username)
@@ -81,11 +79,8 @@ router.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'Email required.' });
-    // Find user
-    const { getAllUsers: getAll } = require('./auth');
-    const users = await getAll();
+    const users = await getAllUsers();
     const user  = users.find(u => u.email === email.toLowerCase());
-    // Always return success (don't reveal if email exists)
     if (user) {
       await sendPasswordReset(user.id, user.email, user.username);
     }
@@ -106,7 +101,7 @@ router.post('/reset-password', async (req, res) => {
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// ── Stats update (called from server after each hand) ─────────────────────
+// ── Stats update ──────────────────────────────────────────────────────────
 router.post('/stats', authMiddleware, async (req, res) => {
   try {
     await updateStats(req.user.id, req.body);
@@ -147,7 +142,7 @@ router.post('/rg/limits', authMiddleware, (req, res) => {
 
 router.post('/rg/self-exclude', authMiddleware, (req, res) => {
   try {
-    const { days } = req.body; // null = permanent, number = days
+    const { days } = req.body;
     const result = rg.selfExclude(req.user.id, days || null);
     res.json(result);
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
@@ -156,7 +151,7 @@ router.post('/rg/self-exclude', authMiddleware, (req, res) => {
 router.post('/rg/cooloff', authMiddleware, (req, res) => {
   try {
     const { hours = 24 } = req.body;
-    const result = rg.setCooloff(req.user.id, Math.min(hours, 168)); // max 1 week
+    const result = rg.setCooloff(req.user.id, Math.min(hours, 168));
     res.json(result);
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
@@ -164,7 +159,6 @@ router.post('/rg/cooloff', authMiddleware, (req, res) => {
 // ── Social features ──────────────────────────────────────────────────────
 const social = require('./socialFeatures');
 
-// Sessions
 router.get('/sessions', authMiddleware, (req, res) => {
   try { res.json({ ok: true, sessions: social.getUserSessions(req.user.id) }); }
   catch(e) { res.status(500).json({ error: 'Server error' }); }
@@ -184,17 +178,16 @@ router.post('/sessions/end', authMiddleware, (req, res) => {
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// Achievements
 router.get('/achievements', authMiddleware, (req, res) => {
   try { res.json({ ok: true, achievements: social.getUserAchievements(req.user.id) }); }
   catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// Friends
+// ── Friends ──────────────────────────────────────────────────────────────
 router.get('/friends', authMiddleware, async (req, res) => {
   try {
     const friendIds = social.getFriends(req.user.id);
-    const allUsers  = await getAll();
+    const allUsers  = await getAllUsers();
     const friends   = friendIds.map(id => {
       const u = allUsers.find(u => u.id === id);
       return u ? { id: u.id, username: u.username, stats: u.stats } : null;
@@ -207,7 +200,7 @@ router.post('/friends/add', authMiddleware, async (req, res) => {
   try {
     const { username } = req.body;
     if (!username) return res.status(400).json({ error: 'Username required' });
-    const allUsers = await getAll();
+    const allUsers = await getAllUsers();
     const friend   = allUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
     if (!friend) return res.status(404).json({ error: 'Player not found' });
     if (friend.id === req.user.id) return res.status(400).json({ error: "Can't add yourself" });
@@ -225,7 +218,7 @@ router.post('/friends/remove', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// Avatar
+// ── Avatar ───────────────────────────────────────────────────────────────
 router.post('/avatar', authMiddleware, (req, res) => {
   try {
     const { image } = req.body;
@@ -242,7 +235,6 @@ router.get('/avatar/:userId', async (req, res) => {
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// Avatar batch fetch
 router.post('/avatars', async (req, res) => {
   try {
     const { userIds } = req.body;
@@ -257,7 +249,7 @@ const _DATA_DIR  = process.env.RAILWAY_ENVIRONMENT
   ? path.join('/tmp', 'rfdata')
   : path.join(__dirname, '../../data');
 const BONUS_FILE = path.join(_DATA_DIR, 'daily_bonus.json');
-const DAILY_GOLD = 1250; // flat daily Gold Chip bonus
+const DAILY_GOLD = 1250;
 
 function loadBonus() {
   try { return JSON.parse(fs.readFileSync(BONUS_FILE,'utf8')); } catch(_) { return {}; }
@@ -293,4 +285,3 @@ router.post('/daily-bonus/claim', authMiddleware, async (req, res) => {
 });
 
 module.exports = router;
-

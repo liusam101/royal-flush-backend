@@ -11,6 +11,7 @@ const { analyzeInteractionSignature }   = require('./botDetection');
 const handHistory                       = require('./handHistory');
 const adminRouter                       = require('./adminRoutes');
 const authRouter                        = require('./authRoutes');
+const lifetimeStats                     = require('./lifetimeStats');
 const { verifyToken, updateChips }      = require('./auth');
 
 const app    = express();
@@ -33,6 +34,7 @@ app.use(express.json());
 app.use((req,_,next)=>{ req.io=io; next(); });
 app.use('/admin', adminRouter);
 app.use('/api/auth', authRouter);
+app.use('/', lifetimeStats);
 
 app.get('/', (req, res) => {
   res.json({ status: 'Royal Flush backend running', tables: tableManager.getTableList() });
@@ -54,9 +56,30 @@ function tryStartNewHand(tableId) {
   const newState = tableManager.getTableState(tableId);
   io.to(tableId).emit('tableState', newState);
   dealCardsToAll(tableId);
-  // Hand history: open new hand record
   const tbl = tableManager.getTables ? tableManager.getTables()[tableId] : null;
   handHistory.startHand(tableId, newState.seats||[], { sb: newState.sb, bb: newState.bb });
+}
+
+// Quick equity heuristic — replace with proper Monte Carlo later.
+function _quickEquity(hole, board, nOpps) {
+  if (!hole || hole.length < 2) return 0;
+  const _rank = (r) => ({ J:11, Q:12, K:13, A:14 }[r] || parseInt(r) || 0);
+  const r1 = _rank(hole[0].r), r2 = _rank(hole[1].r);
+  const pair      = r1 === r2;
+  const suited    = hole[0].s === hole[1].s;
+  const connected = Math.abs(r1 - r2) <= 1;
+  let base = 35;
+  if (pair) base = 65 + (r1 - 2) * 1.5;
+  else if (suited && connected) base = 50;
+  else if (suited) base = 42;
+  else if (connected) base = 38;
+  base = Math.max(20, base - ((nOpps||1) - 1) * 4);
+  return Math.round(Math.min(95, base));
+}
+function _hookHandName(hole) {
+  if (!hole || !hole.length) return 'High Card';
+  if (hole[0].r === hole[1].r) return 'Pair of ' + hole[0].r + 's';
+  return hole[0].r + hole[1].r + (hole[0].s === hole[1].s ? ' suited' : '');
 }
 
 // ── Socket events ─────────────────────────────────────────────────
@@ -78,7 +101,6 @@ io.on('connection', (socket) => {
   // ── Cash game ──────────────────────────────────────────────────
   socket.on('joinTable', (data) => {
     const { tableId, playerName, buyIn } = data;
-    // Anti-cheat: check player before allowing join
     const ip = socket.handshake.headers['x-forwarded-for']?.split(',')[0]?.trim()
              || socket.handshake.address || 'unknown';
     const fp = socket.handshake.auth?.fingerprint
@@ -101,11 +123,9 @@ io.on('connection', (socket) => {
     const currentState = tableManager.getTableState(tableId);
     io.to(tableId).emit('tableState', currentState);
 
-    // Anti-cheat: track join
     const seats = tableManager.getTableState(tableId)?.seats || [];
     antiCheat.onJoinTable(socket.id, tableId, seats.map(s=>({socketId:s.socketId||s.seat})));
 
-    // Re-send hole cards if hand already running
     if (currentState?.phase === 'preflop' && !result.willStartHand) {
       const myCards = tableManager.getPlayerCards(tableId).find(p=>p.socketId===socket.id);
       if (myCards?.cards?.length) socket.emit('dealCards', { cards: myCards.cards });
@@ -123,7 +143,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('playerAction', async ({ tableId, action, amount, signals }) => {
-    // Anti-cheat: track action timing and context
     const preState = tableManager.getTableState(tableId);
     const mySeat   = preState?.seats?.find(s => s.socketId === socket.id);
     const acOk = antiCheat.onAction(socket.id, action, tableId, {
@@ -132,7 +151,6 @@ io.on('connection', (socket) => {
       isPreflop: preState?.phase === 'preflop',
     });
     if (acOk === false) { socket.emit('error',{message:'Action rate limited'}); return; }
-    // Analyze client-side interaction signals for bot detection
     if (signals) {
       const sigResult = analyzeInteractionSignature(signals);
       if (sigResult.botScore > 0.7) {
@@ -150,7 +168,6 @@ io.on('connection', (socket) => {
       }
     }
     if (mySeat) antiCheat.setPlayerStack(socket.id, mySeat.stack);
-    // Hand history: record action
     handHistory.recordAction(tableId, mySeat?.name || '?', action, amount, preState);
 
     const result = tableManager.handleAction(tableId, socket.id, action, amount);
@@ -161,7 +178,6 @@ io.on('connection', (socket) => {
 
     if (result.handOver) {
       const hr = result.handResult;
-      // Anti-cheat: record hand result for chip dump detection
       if (hr?.winner) {
         const winnerSeat = preState?.seats?.find(s=>s.name===hr.winner);
         const loserSeats = preState?.seats?.filter(s=>s.name!==hr.winner&&!s.folded);
@@ -174,9 +190,7 @@ io.on('connection', (socket) => {
         });
       }
       io.to(tableId).emit('handResult', hr);
-      // Hand history: close hand record
       handHistory.endHand(tableId, hr);
-      // Sync chip balance back to DB for authenticated players
       const finalState = tableManager.getTableState(tableId);
       if (finalState?.seats) {
         for (const seat of finalState.seats) {
@@ -195,7 +209,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('sngTableJoin', ({ tournId, playerName }) => {
-    // Player is ready at the SNG table — send them current tournament state
     const state = tournamentEngine.getState(tournId);
     if (!state) { socket.emit('error', { message: 'Tournament not found' }); return; }
     socket.emit('tournState', state);
@@ -235,7 +248,6 @@ io.on('connection', (socket) => {
 
   // ── Sit & Go ────────────────────────────────────────────────────
   socket.on('sngJoin', ({ sngId, playerName, buyIn, max, rake, startingStack, name }) => {
-    // Find an existing waiting tournament for this sngId, or create one
     let tourn = tournamentEngine.getAll().find(t =>
       t.status === 'registering' &&
       t.sngId === sngId &&
@@ -261,14 +273,11 @@ io.on('connection', (socket) => {
     socket.join('tourn_' + tourn.id);
     socket.emit('sngRegistered', { tournId: tourn.id, registered: result.registered, max: tourn.maxPlayers });
 
-    // Broadcast updated state to everyone in lobby
     const state = tournamentEngine.getState(tourn.id);
-    // Include registered player names for seat dots
     state.registeredPlayers = tourn.registeredPlayers.map(p => ({ name: p.name }));
     io.to('tourn_' + tourn.id).emit('sngLobbyUpdate', state);
     io.to('admin').emit('tournState', state);
 
-    // Auto-start when full
     if (result.registered >= tourn.maxPlayers) {
       setTimeout(() => {
         const startResult = tournamentEngine.start(tourn.id, io);
@@ -279,14 +288,76 @@ io.on('connection', (socket) => {
           });
           io.to('admin').emit('tournState', tournamentEngine.getState(tourn.id));
         }
-      }, 5000); // 5s countdown
+      }, 5000);
     }
+  });
+
+  // ── SNG game action (player fold/call/raise during an SNG) ─────
+  socket.on('sngAction', ({ sngId, action, amount }) => {
+    const tourn = tournamentEngine.getState(sngId);
+    if (!tourn || tourn.status !== 'running') {
+      socket.emit('error', { message: 'Tournament not running' });
+      return;
+    }
+    const tableId = tourn.tableId || ('sng-' + sngId);
+    const result = tableManager.handleAction(tableId, socket.id, action, amount);
+    if (!result.ok) { socket.emit('error', { message: result.error }); return; }
+    io.to('tourn_' + sngId).emit('tableState', tableManager.getTableState(tableId));
+  });
+
+  // ── Time bank (extra time on a decision) ────────────────────────
+  socket.on('requestTimeBank', ({ tableId }) => {
+    const state = tableManager.getTableState(tableId);
+    const seat  = state?.seats?.find(s => s.socketId === socket.id);
+    if (!seat || !seat.acting) {
+      socket.emit('error', { message: 'Not your turn' });
+      return;
+    }
+    if (typeof tableManager.grantTimeBank === 'function') {
+      tableManager.grantTimeBank(tableId, socket.id);
+    }
+    socket.emit('timeBankGranted', { secondsAdded: 30 });
+    io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+  });
+
+  // ── Run It Twice ────────────────────────────────────────────────
+  socket.on('ritResponse', ({ tableId, accept }) => {
+    if (typeof tableManager.setRitResponse === 'function') {
+      tableManager.setRitResponse(tableId, socket.id, accept);
+      io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+    }
+  });
+
+  // ── Muck or Show ────────────────────────────────────────────────
+  socket.on('muckOrShow', ({ tableId, show }) => {
+    if (typeof tableManager.setMuckOrShow === 'function') {
+      tableManager.setMuckOrShow(tableId, socket.id, show);
+      io.to(tableId).emit('cardsRevealed', { socketId: socket.id, revealed: show });
+    }
+  });
+
+  // ── Rabbit Hunt ─────────────────────────────────────────────────
+  socket.on('rabbitHunt', ({ tableId }) => {
+    if (typeof tableManager.getRabbitCards === 'function') {
+      const cards = tableManager.getRabbitCards(tableId);
+      socket.emit('rabbitCards', { cards });
+    } else {
+      socket.emit('rabbitCards', { cards: [] });
+    }
+  });
+
+  // ── Equity calculator ────────────────────────────────────────────
+  socket.on('calcEquity', ({ holeCards, board, numOpponents }) => {
+    const handStrength = _quickEquity(holeCards, board, numOpponents || 1);
+    socket.emit('equityResult', {
+      equity: handStrength,
+      handName: _hookHandName(holeCards),
+    });
   });
 
   socket.on('joinAdmin', ({ secret }) => {
     if (secret === (process.env.ADMIN_SECRET || 'rf_admin_2025')) {
       socket.join('admin');
-      // Send full state snapshot
       socket.emit('adminSnapshot', {
         tables: tableManager.getTableList().map(t=>({ ...t, state: tableManager.getTableState(t.id) })),
         tournaments: tournamentEngine.getAll().map(t=>tournamentEngine.getState(t.id)),
@@ -299,7 +370,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Admin creates tournament via socket
   socket.on('adminCreateTournament', ({ secret, config }) => {
     if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
     const t = tournamentEngine.createTournament({ ...config, adminCreated:true });
@@ -328,6 +398,19 @@ io.on('connection', (socket) => {
     io.to(socketId).emit('kicked', { reason: reason || 'Removed by admin' });
     const affected = tableManager.removePlayer(socketId);
     affected.forEach(tid => io.to(tid).emit('tableState', tableManager.getTableState(tid)));
+  });
+
+  // ── Admin asset push (Blender table / background) ──────────────
+  socket.on('adminPushAsset', ({ secret, type, name, pushedAt }) => {
+    if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
+    io.emit('assetUpdate', {
+      type,
+      name: name || null,
+      pushedAt: pushedAt || new Date().toISOString(),
+    });
+    const playerCount = io.sockets.sockets.size;
+    io.to('admin').emit('adminAssetPushed', { type, name, tables: playerCount });
+    console.log(`[Assets] Admin pushed ${type} "${name||'?'}" → ${playerCount} clients`);
   });
 
   socket.on('disconnect', () => {
