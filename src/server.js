@@ -219,11 +219,9 @@ io.on('connection', (socket) => {
   socket.on('sitOut',       ({ tableId }) => { tableManager.setSitOut(tableId, socket.id, true);  io.to(tableId).emit('tableState', tableManager.getTableState(tableId)); });
   socket.on('returnToTable',({ tableId }) => { tableManager.setSitOut(tableId, socket.id, false); socket.join(tableId); io.to(tableId).emit('tableState', tableManager.getTableState(tableId)); setTimeout(()=>tryStartNewHand(tableId),500); });
   socket.on('leaveTable', async ({ tableId }) => {
-    const preState = tableManager.getTableState(tableId);
-    const leavingSeat = preState?.seats?.find(s => s.socketId === socket.id);
-    const returnedStack = leavingSeat?.stack || 0;
+    const leaveResult = tableManager.leaveTable(tableId, socket.id);
+    const returnedStack = leaveResult?.stack || 0;
 
-    tableManager.leaveTable(tableId, socket.id);
     socket.leave(tableId);
     antiCheat.onLeaveTable(socket.id);
     io.to(tableId).emit('tableState', tableManager.getTableState(tableId));

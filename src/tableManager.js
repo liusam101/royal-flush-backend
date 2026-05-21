@@ -222,6 +222,7 @@ const tableManager = {
     // Clear any auto-fold timers for the leaving player
     const leaving = t.seats.find(s => s.socketId === socketId);
     if (leaving?._autoFoldTimer) { clearTimeout(leaving._autoFoldTimer); }
+    const returnedStack = leaving?.stack || 0;
 
     t.seats = t.seats.filter(s => s.socketId !== socketId);
     t.seats.forEach((s, i) => { s.seat = i; });
@@ -231,6 +232,7 @@ const tableManager = {
     }
     if (t.actIdx    >= t.seats.length) t.actIdx    = 0;
     if (t.dealerIdx >= t.seats.length) t.dealerIdx = 0;
+    return { stack: returnedStack };
   },
 
   removePlayer(socketId) {
