@@ -5,7 +5,7 @@ const cors       = require('cors');
 require('dotenv').config();
 
 const { tableManager }     = require('./tableManager');
-const { tournamentEngine } = require('./tournamentEngine');
+const { tournamentEngine, STD_BLINDS } = require('./tournamentEngine');
 const { antiCheat }                     = require('./antiCheat');
 const { analyzeInteractionSignature }   = require('./botDetection');
 const handHistory                       = require('./handHistory');
@@ -281,28 +281,107 @@ io.on('connection', (socket) => {
     if (result.registered >= tourn.maxPlayers) {
       setTimeout(() => {
         const startResult = tournamentEngine.start(tourn.id, io);
-        if (startResult.ok) {
-          io.to('tourn_' + tourn.id).emit('sngStarting', {
-            tournId: tourn.id,
-            state: tournamentEngine.getState(tourn.id),
+        if (!startResult.ok) return;
+
+        const blinds = STD_BLINDS[0]; // [sb, bb] at level 0
+
+        // Create real tableManager tables so sngAction can route to them
+        Object.entries(tourn.tables).forEach(([tid, tbl]) => {
+          tableManager.createTable(tid, {
+            name: (tourn.name || 'SNG') + ' Table',
+            sb: blinds[0], bb: blinds[1],
+            maxSeats: tbl.seats.length,
+            isTournament: true,
           });
-          io.to('admin').emit('tournState', tournamentEngine.getState(tourn.id));
-        }
+          tbl.seats.forEach(p => {
+            tableManager.joinTable(tid, p.socketId, p.name, p.chips);
+          });
+        });
+
+        io.to('tourn_' + tourn.id).emit('sngStarting', {
+          tournId: tourn.id,
+          state: tournamentEngine.getState(tourn.id),
+        });
+        io.to('admin').emit('tournState', tournamentEngine.getState(tourn.id));
+
+        // After the 5s countdown shown on clients, send each player to their table
+        setTimeout(() => {
+          tourn.registeredPlayers.forEach(p => {
+            const pSocket = io.sockets.sockets.get(p.socketId);
+            if (!pSocket || !p.tableId) return;
+            pSocket.join(p.tableId);
+            pSocket.emit('sngTableReady', {
+              tournId: tourn.id,
+              tableId: p.tableId,
+              state: { blinds: { sb: blinds[0], bb: blinds[1] } },
+            });
+          });
+          // Start first hand and register auto-fold for each table
+          Object.keys(tourn.tables).forEach(tid => {
+            tryStartNewHand(tid);
+            tableManager.onAutoFold(tid, (autoTid) => {
+              const s = tableManager.getTableState(autoTid);
+              if (s) io.to(autoTid).emit('tableState', s);
+              if (s?.phase === 'waiting' || s?.phase === 'starting') {
+                setTimeout(() => tryStartNewHand(autoTid), 3500);
+              }
+            });
+          });
+        }, 5500);
       }, 5000);
     }
   });
 
   // ── SNG game action (player fold/call/raise during an SNG) ─────
   socket.on('sngAction', ({ sngId, action, amount }) => {
-    const tourn = tournamentEngine.getState(sngId);
+    const tourn = tournamentEngine.get(sngId);
     if (!tourn || tourn.status !== 'running') {
       socket.emit('error', { message: 'Tournament not running' });
       return;
     }
-    const tableId = tourn.tableId || ('sng-' + sngId);
+    const player = tourn.registeredPlayers.find(p => p.socketId === socket.id);
+    if (!player || !player.tableId) {
+      socket.emit('error', { message: 'Not seated at a table' });
+      return;
+    }
+    const tableId = player.tableId;
+
     const result = tableManager.handleAction(tableId, socket.id, action, amount);
     if (!result.ok) { socket.emit('error', { message: result.error }); return; }
-    io.to('tourn_' + sngId).emit('tableState', tableManager.getTableState(tableId));
+
+    const newState = tableManager.getTableState(tableId);
+    io.to(tableId).emit('tableState', newState);
+
+    if (result.handOver) {
+      io.to(tableId).emit('handResult', result.handResult);
+
+      // Eliminate busted players (stack = 0 after hand)
+      const postState = tableManager.getTableState(tableId);
+      if (postState?.seats) {
+        postState.seats.forEach(seat => {
+          if (seat.stack <= 0) {
+            const elim = tournamentEngine.eliminatePlayer(sngId, seat.socketId);
+            if (elim) {
+              io.to(seat.socketId).emit('sngEliminated', {
+                place: elim.place,
+                prize: elim.prize,
+                remainingPlayers: elim.remaining,
+              });
+              tableManager.leaveTable(tableId, seat.socketId);
+            }
+          }
+        });
+      }
+
+      const updatedTourn = tournamentEngine.get(sngId);
+      if (updatedTourn.status === 'finished') {
+        io.to('tourn_' + sngId).emit('sngResult', { results: updatedTourn.results });
+        tableManager.removeTable(tableId);
+      } else {
+        io.to('tourn_' + sngId).emit('tournState', tournamentEngine.getState(sngId));
+        setTimeout(() => tryStartNewHand(tableId), 3500);
+      }
+    }
   });
 
   // ── Time bank (extra time on a decision) ────────────────────────
