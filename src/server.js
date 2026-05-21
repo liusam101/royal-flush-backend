@@ -218,11 +218,24 @@ io.on('connection', (socket) => {
 
   socket.on('sitOut',       ({ tableId }) => { tableManager.setSitOut(tableId, socket.id, true);  io.to(tableId).emit('tableState', tableManager.getTableState(tableId)); });
   socket.on('returnToTable',({ tableId }) => { tableManager.setSitOut(tableId, socket.id, false); socket.join(tableId); io.to(tableId).emit('tableState', tableManager.getTableState(tableId)); setTimeout(()=>tryStartNewHand(tableId),500); });
-  socket.on('leaveTable', ({ tableId }) => {
+  socket.on('leaveTable', async ({ tableId }) => {
+    const preState = tableManager.getTableState(tableId);
+    const leavingSeat = preState?.seats?.find(s => s.socketId === socket.id);
+    const returnedStack = leavingSeat?.stack || 0;
+
     tableManager.leaveTable(tableId, socket.id);
     socket.leave(tableId);
     antiCheat.onLeaveTable(socket.id);
     io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+
+    if (socket.userId && returnedStack > 0) {
+      const delta = returnedStack - (socket.chips || 0);
+      if (Math.abs(delta) > 0.001) {
+        await updateChips(socket.userId, delta, 0);
+      }
+      socket.chips = returnedStack;
+      socket.emit('chipsReturned', { balance: returnedStack });
+    }
   });
   socket.on('chatMessage', ({ tableId, playerName, message }) => {
     antiCheat.onChat(socket.id, message);
