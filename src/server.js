@@ -16,6 +16,9 @@ const { verifyToken, updateChips }      = require('./auth');
 
 const app    = express();
 const server = http.createServer(app);
+
+// In-memory store for last-pushed assets (survives reconnects, cleared on restart)
+const _pushedAssets = {};
 const ALLOWED_ORIGINS = [
   'https://royal-flush-frontend.vercel.app',
   'http://localhost:3000',
@@ -460,6 +463,7 @@ io.on('connection', (socket) => {
         tournaments: tournamentEngine.getAll().map(t=>tournamentEngine.getState(t.id)),
         antiCheat: antiCheat.getDashboard(),
         handHistory: handHistory.getStats(),
+        assets: _pushedAssets,
       });
       console.log(`    Admin connected: ${socket.id}`);
     } else {
@@ -498,16 +502,20 @@ io.on('connection', (socket) => {
   });
 
   // ── Admin asset push (Blender table / background) ──────────────
-  socket.on('adminPushAsset', ({ secret, type, name, pushedAt }) => {
+  socket.on('adminPushAsset', ({ secret, type, name, pushedAt, dataUrl }) => {
     if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
+    const ts = pushedAt || new Date().toISOString();
+    // Cache so late-joining players can receive current assets
+    if (dataUrl) _pushedAssets[type] = { type, name: name || null, pushedAt: ts, dataUrl };
     io.emit('assetUpdate', {
       type,
       name: name || null,
-      pushedAt: pushedAt || new Date().toISOString(),
+      pushedAt: ts,
+      dataUrl: dataUrl || null,
     });
     const playerCount = io.sockets.sockets.size;
     io.to('admin').emit('adminAssetPushed', { type, name, tables: playerCount });
-    console.log(`[Assets] Admin pushed ${type} "${name||'?'}" → ${playerCount} clients`);
+    console.log(`[Assets] Admin pushed ${type} "${name||'?'}" (${dataUrl ? Math.round(dataUrl.length/1024)+'KB' : 'no data'}) → ${playerCount} clients`);
   });
 
   socket.on('disconnect', () => {
