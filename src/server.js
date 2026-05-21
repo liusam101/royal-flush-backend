@@ -16,18 +16,25 @@ const { verifyToken, updateChips }      = require('./auth');
 
 const app    = express();
 const server = http.createServer(app);
-const io     = new Server(server, {
-  cors: {
-    origin: ['https://royal-flush-frontend.vercel.app', 'http://localhost:3000'],
-    methods: ['GET','POST','DELETE'],
-    credentials: true,
+const ALLOWED_ORIGINS = [
+  'https://royal-flush-frontend.vercel.app',
+  'http://localhost:3000',
+  'http://localhost:3001',
+];
+function originAllowed(origin, cb) {
+  // allow file:// (origin=null), allowed list, and any localhost port
+  if (!origin || origin === 'null' || ALLOWED_ORIGINS.includes(origin) || /^http:\/\/localhost(:\d+)?$/.test(origin)) {
+    cb(null, true);
+  } else {
+    cb(new Error('CORS: origin not allowed'));
   }
+}
+
+const io     = new Server(server, {
+  cors: { origin: originAllowed, methods: ['GET','POST','DELETE'], credentials: true }
 });
 
-app.use(cors({
-  origin: ['https://royal-flush-frontend.vercel.app', 'http://localhost:3000', 'http://localhost:3001'],
-  credentials: true,
-}));
+app.use(cors({ origin: originAllowed, credentials: true }));
 app.use(express.json());
 
 // Inject io into admin routes
@@ -542,3 +549,4 @@ const PORT = process.env.PORT || 3001;
 initAuth().then(() => {
   server.listen(PORT, () => console.log(`Royal Flush backend :${PORT}`));
 });
+
