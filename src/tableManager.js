@@ -178,7 +178,8 @@ const tableManager = {
     if (buyIn < t.bb * 20) return { ok: false, error: `Min buy-in is $${t.bb * 20}` };
 
     const seatIdx = t.seats.length;
-    t.seats.push({ socketId, name: playerName, stack: buyIn, seat: seatIdx, bet: 0, totalBet: 0, folded: false, cards: [] });
+    const midHand = t.phase !== 'waiting' && t.phase !== 'starting';
+    t.seats.push({ socketId, name: playerName, stack: buyIn, seat: seatIdx, bet: 0, totalBet: 0, folded: false, cards: [], sitOut: midHand, pendingActive: midHand });
 
     const willStartHand = (t.seats.length === 2 && t.phase === 'waiting');
     if (willStartHand) {
@@ -535,6 +536,8 @@ const tableManager = {
     t.seats.forEach(s => {
       s.bet = 0; s.totalBet = 0; s.folded = false; s.cards = [];
       if (s._autoFoldTimer) { clearTimeout(s._autoFoldTimer); s._autoFoldTimer = null; }
+      // Players who joined mid-hand are now ready to play
+      if (s.pendingActive) { s.sitOut = false; s.pendingActive = false; }
     });
     t.dealerIdx = (t.dealerIdx + 1) % t.seats.length;
   },
