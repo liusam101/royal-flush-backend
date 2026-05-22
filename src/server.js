@@ -109,6 +109,16 @@ io.on('connection', (socket) => {
     }
   }
 
+  // Deliver any previously pushed assets to this newly connecting client
+  Object.values(_pushedAssets).forEach(asset => {
+    socket.emit('assetUpdate', {
+      type: asset.type,
+      name: asset.name,
+      pushedAt: asset.pushedAt,
+      dataUrl: asset.dataUrl,
+    });
+  });
+
   // ── Cash game ──────────────────────────────────────────────────
   socket.on('joinTable', (data) => {
     const { tableId, playerName, buyIn } = data;
