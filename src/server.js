@@ -34,7 +34,8 @@ function originAllowed(origin, cb) {
 }
 
 const io     = new Server(server, {
-  cors: { origin: originAllowed, methods: ['GET','POST','DELETE'], credentials: true }
+  cors: { origin: originAllowed, methods: ['GET','POST','DELETE'], credentials: true },
+  maxHttpBufferSize: 50 * 1024 * 1024  // 50MB — supports large GLB/PNG asset pushes
 });
 
 app.use(cors({ origin: originAllowed, credentials: true }));
