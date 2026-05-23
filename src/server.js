@@ -51,6 +51,13 @@ app.get('/', (req, res) => {
   res.json({ status: 'Royal Flush backend running', tables: tableManager.getTableList() });
 });
 
+// Serve pushed assets over HTTP so demo-mode clients (no socket) can still fetch them
+app.get('/api/assets', (req, res) => {
+  res.json(Object.values(_pushedAssets).map(a => ({
+    type: a.type, name: a.name, pushedAt: a.pushedAt, dataUrl: a.dataUrl,
+  })));
+});
+
 // ── Helpers ──────────────────────────────────────────────────────
 function dealCardsToAll(tableId) {
   const cards = tableManager.getPlayerCards(tableId);
