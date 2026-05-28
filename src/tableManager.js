@@ -1,4 +1,4 @@
-const { GameEngine } = require('./gameEngine');
+const { GameEngine, bestFive, compareScore } = require('./gameEngine');
 
 const tables = {};
 
@@ -75,9 +75,9 @@ function showdownWithSidePots(engine, seats, board) {
     for (const seat of eligibleSeats) {
       const seven = [...seat.cards, ...board];
       if (seven.length < 5) continue;
-      const result = engine.bestFivePublic ? engine.bestFivePublic(seven) : null;
+      const result = bestFive(seven);
       if (!result) continue;
-      if (!winScore || engine.comparePublic(result.score, winScore) > 0) {
+      if (!winScore || compareScore(result.score, winScore) > 0) {
         winner = seat; winScore = result.score;
       }
     }
@@ -379,16 +379,13 @@ const tableManager = {
       // Simple case — single pot
       const result = t.engine.showdown(active, t.board);
       const winner = active.find(s => s.name === result.winner);
-      if (winner) winner.stack += totalPot;
-      // Include all players' hole cards so clients can flip them at showdown
       // ── Rake: 2.5% of pot, capped at $3 (exempt: tournaments, pots < $1)
       let rake = 0;
       if (!t.isTournament && totalPot >= 1) {
         rake = Math.min(Math.round(totalPot * 0.025 * 100) / 100, 3.00);
-        // Deduct rake from winner's share
-        active[0].stack = Math.max(0, active[0].stack - rake);
         t._rakeCollected = (t._rakeCollected || 0) + rake;
       }
+      if (winner) winner.stack += (totalPot - rake);
       const showCards = active.map(s => ({ name: s.name, cards: s.cards }));
       const handResult = { winner: result.winner, hand: result.hand, amount: totalPot - rake, rake, board: t.board, showCards };
       this._resetHand(tableId);
