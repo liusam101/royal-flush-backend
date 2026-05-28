@@ -11,6 +11,7 @@ const { analyzeInteractionSignature }   = require('./botDetection');
 const handHistory                       = require('./handHistory');
 const adminRouter                       = require('./adminRoutes');
 const authRouter                        = require('./authRoutes');
+const paymentRouter                     = require('./paymentRoutes');
 const lifetimeStats                     = require('./lifetimeStats');
 const { verifyToken, updateChips }      = require('./auth');
 
@@ -39,12 +40,17 @@ const io     = new Server(server, {
 });
 
 app.use(cors({ origin: originAllowed, credentials: true }));
+
+// Stripe webhook needs raw body — must be before express.json()
+app.use('/api/payment/webhook', express.raw({ type: 'application/json' }));
+
 app.use(express.json());
 
 // Inject io into admin routes
 app.use((req,_,next)=>{ req.io=io; next(); });
 app.use('/admin', adminRouter);
 app.use('/api/auth', authRouter);
+app.use('/api/payment', paymentRouter);
 app.use('/', lifetimeStats);
 
 app.get('/', (req, res) => {
