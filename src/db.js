@@ -88,6 +88,15 @@ async function initDB() {
         expires_at BIGINT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS payments (
+        session_id  TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL,
+        amount_usd  INT NOT NULL,
+        gold_chips  BIGINT NOT NULL,
+        royal_chips NUMERIC(12,2) NOT NULL,
+        created_at  BIGINT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS users_email_idx    ON users(email);
       CREATE INDEX IF NOT EXISTS users_username_idx ON users(username);
     `);
