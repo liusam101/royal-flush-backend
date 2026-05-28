@@ -116,6 +116,27 @@ async function sendVerificationEmail(userId, email, username) {
   });
 }
 
+// ── OTP VERIFICATION ──────────────────────────────────────────────────────
+async function sendOTPEmail(userId, email, username, code) {
+  return sendMail({
+    to:      email,
+    subject: `${code} — Your Royal Flush verification code`,
+    text:    `Hi ${username},\n\nYour verification code is: ${code}\n\nThis code expires in 10 minutes.\n\nRoyal Flush Team`,
+    html: `
+      <div style="font-family:sans-serif;max-width:480px;margin:0 auto;background:#0a0a0f;color:#fff;padding:32px;border-radius:8px">
+        <div style="font-size:24px;font-weight:700;margin-bottom:8px">
+          <span style="color:#C9A84C">ROYAL</span>FLUSH
+        </div>
+        <h2 style="font-size:20px;margin:24px 0 8px">Verify your email</h2>
+        <p style="color:rgba(255,255,255,0.6);line-height:1.6">Hi ${username}, use the code below to verify your account. It expires in 10 minutes.</p>
+        <div style="margin:28px 0;text-align:center">
+          <span style="display:inline-block;font-size:42px;font-weight:700;letter-spacing:14px;color:#C9A84C;background:rgba(201,168,76,0.08);padding:18px 28px;border-radius:8px;border:1px solid rgba(201,168,76,0.25)">${code}</span>
+        </div>
+        <p style="color:rgba(255,255,255,0.3);font-size:11px;margin-top:24px">If you didn't sign up for Royal Flush, ignore this email.</p>
+      </div>`,
+  });
+}
+
 // ── PASSWORD RESET ─────────────────────────────────────────────────────────
 async function sendPasswordReset(userId, email, username) {
   const token = makeToken('reset', userId, email);
@@ -137,4 +158,4 @@ async function sendPasswordReset(userId, email, username) {
   });
 }
 
-module.exports = { sendVerificationEmail, sendPasswordReset, consumeToken, makeToken };
+module.exports = { sendVerificationEmail, sendOTPEmail, sendPasswordReset, consumeToken, makeToken };
