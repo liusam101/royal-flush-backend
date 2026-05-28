@@ -6,8 +6,17 @@
 // ══════════════════════════════════════════════════════════════════════════
 const express = require('express');
 const router  = express.Router();
-const stripe  = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { authMiddleware, updateChips, getUser } = require('./auth');
+
+// Lazy init — Stripe throws at module load if key is missing
+let _stripe = null;
+function getStripe() {
+  if (!_stripe) {
+    if (!process.env.STRIPE_SECRET_KEY) throw new Error('STRIPE_SECRET_KEY not set');
+    _stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+  }
+  return _stripe;
+}
 const db = require('./db');
 
 const SITE_URL = process.env.SITE_URL || 'https://royal-flush-frontend.vercel.app';
@@ -58,7 +67,7 @@ router.post('/checkout', authMiddleware, async (req, res) => {
     const user = await getUser(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found.' });
 
-    const session = await stripe.checkout.sessions.create({
+    const session = await getStripe().checkout.sessions.create({
       mode: 'payment',
       line_items: [{
         price_data: {
@@ -97,7 +106,7 @@ router.post('/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
   try {
-    event = stripe.webhooks.constructEvent(
+    event = getStripe().webhooks.constructEvent(
       req.body, sig, process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch(e) {
@@ -130,7 +139,7 @@ router.get('/verify/:sessionId', authMiddleware, async (req, res) => {
   try {
     if (!process.env.STRIPE_SECRET_KEY) return res.json({ ok: false });
 
-    const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
+    const session = await getStripe().checkout.sessions.retrieve(req.params.sessionId);
     if (session.payment_status !== 'paid') {
       return res.json({ ok: false, status: session.payment_status });
     }
