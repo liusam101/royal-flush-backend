@@ -78,6 +78,8 @@ async function initDB() {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS pfr_total      INT DEFAULT 0;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS showdown_wins  INT DEFAULT 0;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS showdown_total INT DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_code       VARCHAR(6);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_expires    BIGINT;
 
       CREATE TABLE IF NOT EXISTS sessions (
         token      TEXT PRIMARY KEY,
