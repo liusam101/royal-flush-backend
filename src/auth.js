@@ -252,6 +252,39 @@ async function verifyEmail(userId) {
   }
 }
 
+async function setOTP(userId, code) {
+  const expires = Date.now() + 10 * 60 * 1000;
+  if (useDB) {
+    await db.query('UPDATE users SET otp_code=$1, otp_expires=$2 WHERE id=$3', [code, expires, userId]);
+  } else {
+    const users = loadUsers();
+    const u = users[userId];
+    if (u) { u.otp_code = code; u.otp_expires = expires; saveUsers(users); }
+  }
+}
+
+async function verifyOTP(userId, code) {
+  if (useDB) {
+    const row = await db.queryOne('SELECT otp_code, otp_expires, email_verified FROM users WHERE id=$1', [userId]);
+    if (!row) return { ok: false, error: 'Account not found.' };
+    if (row.email_verified) return { ok: true, alreadyVerified: true };
+    if (row.otp_code !== code) return { ok: false, error: 'Incorrect code.' };
+    if (Date.now() > parseInt(row.otp_expires)) return { ok: false, error: 'Code expired. Request a new one.' };
+    await db.query('UPDATE users SET email_verified=true, otp_code=NULL, otp_expires=NULL WHERE id=$1', [userId]);
+    return { ok: true };
+  } else {
+    const users = loadUsers();
+    const u = users[userId];
+    if (!u) return { ok: false, error: 'Account not found.' };
+    if (u.emailVerified) return { ok: true, alreadyVerified: true };
+    if (u.otp_code !== code) return { ok: false, error: 'Incorrect code.' };
+    if (Date.now() > u.otp_expires) return { ok: false, error: 'Code expired. Request a new one.' };
+    u.emailVerified = true; u.otp_code = null; u.otp_expires = null;
+    saveUsers(users);
+    return { ok: true };
+  }
+}
+
 // ── Password reset ────────────────────────────────────────────────────────
 async function resetPassword(userId, newPassword) {
   if (newPassword.length < 6) return { ok: false, error: 'Password must be at least 6 characters.' };
@@ -316,5 +349,5 @@ function authMiddleware(req, res, next) {
 module.exports = {
   initAuth, register, login, verifyToken, verifyTokenAsync,
   getUser, updateChips, banUser, getAllUsers, authMiddleware,
-  verifyEmail, resetPassword, updateStats, JWT_SECRET
+  verifyEmail, setOTP, verifyOTP, resetPassword, updateStats, JWT_SECRET
 };
