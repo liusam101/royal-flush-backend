@@ -1,10 +1,16 @@
 const express = require('express');
 const router  = express.Router();
 const { register, login, verifyTokenAsync, getUser, getAllUsers, banUser,
-        authMiddleware, verifyEmail, resetPassword, updateStats, updateChips } = require('./auth');
-const fs   = require('fs');
-const path = require('path');
-const { sendVerificationEmail, sendPasswordReset, consumeToken } = require('./email');
+        authMiddleware, verifyEmail, setOTP, verifyOTP, resetPassword, updateStats, updateChips } = require('./auth');
+const fs     = require('fs');
+const path   = require('path');
+const crypto = require('crypto');
+const { sendVerificationEmail, sendOTPEmail, sendPasswordReset, consumeToken } = require('./email');
+
+function generateOTP() {
+  // cryptographically random 6-digit code
+  return String(100000 + (crypto.randomBytes(3).readUIntBE(0, 3) % 900000));
+}
 const { antiCheat } = require('./antiCheat');
 
 // ── Register ──────────────────────────────────────────────────────────────
@@ -17,11 +23,12 @@ router.post('/register', async (req, res) => {
     const result = await register({ username, email, password });
     if (!result.ok) return res.status(400).json({ error: result.error });
     res.json({ ok: true, token: result.token, user: result.user });
-    setImmediate(() => {
+    setImmediate(async () => {
       try {
-        sendVerificationEmail(result.user.id, result.user.email, result.user.username)
-          .catch(e => console.error('[Email] Verify send failed:', e.message));
-      } catch(e) { console.error('[Email] Verify setup failed:', e.message); }
+        const code = generateOTP();
+        await setOTP(result.user.id, code);
+        await sendOTPEmail(result.user.id, result.user.email, result.user.username, code);
+      } catch(e) { console.error('[Email] OTP send failed:', e.message); }
     });
   } catch(e) { console.error('/register:', e); res.status(500).json({ error: 'Server error' }); }
 });
@@ -53,7 +60,7 @@ router.get('/me', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// ── Email verification ────────────────────────────────────────────────────
+// ── Email verification (link-based — legacy fallback) ─────────────────────
 router.post('/verify-email', async (req, res) => {
   try {
     const result = consumeToken(req.body.token, 'verify');
@@ -63,14 +70,27 @@ router.post('/verify-email', async (req, res) => {
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// Resend verification
+// ── OTP verification ──────────────────────────────────────────────────────
+router.post('/verify-otp', authMiddleware, async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code || !/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter a 6-digit code.' });
+    const result = await verifyOTP(req.user.id, code);
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ok: true, message: 'Email verified!' });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// ── Resend verification (OTP) ─────────────────────────────────────────────
 router.post('/resend-verification', authMiddleware, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (user.emailVerified) return res.json({ ok: true, message: 'Already verified.' });
-    await sendVerificationEmail(user.id, user.email, user.username);
-    res.json({ ok: true, message: 'Verification email sent.' });
+    const code = generateOTP();
+    await setOTP(user.id, code);
+    await sendOTPEmail(user.id, user.email, user.username, code);
+    res.json({ ok: true, message: 'A new verification code has been sent to your email.' });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
