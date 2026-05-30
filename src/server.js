@@ -22,6 +22,8 @@ const server = http.createServer(app);
 const _pushedAssets = {};
 const ALLOWED_ORIGINS = [
   'https://royal-flush-frontend.vercel.app',
+  'https://barrelpoker.com',
+  'https://www.barrelpoker.com',
   'http://localhost:3000',
   'http://localhost:3001',
 ];
