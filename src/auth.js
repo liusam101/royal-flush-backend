@@ -143,12 +143,12 @@ async function login({ email, password }) {
     user = Object.values(users).find(u => u.email === email.toLowerCase());
   }
 
-  if (!user) return { ok: false, error: 'No account found with that email.' };
+  if (!user) return { ok: false, error: 'Invalid email or password.' };
   if (user.banned) return { ok: false, error: 'This account has been suspended.' };
 
   const hash = user.password_hash || user.passwordHash;
   const match = await bcrypt.compare(password, hash);
-  if (!match) return { ok: false, error: 'Incorrect password.' };
+  if (!match) return { ok: false, error: 'Invalid email or password.' };
 
   // Update last login
   if (useDB) {
