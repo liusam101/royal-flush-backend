@@ -62,7 +62,7 @@ app.get('/', (req, res) => {
 // Serve pushed assets over HTTP so demo-mode clients (no socket) can still fetch them
 app.get('/api/assets', (req, res) => {
   res.json(Object.values(_pushedAssets).map(a => ({
-    type: a.type, name: a.name, pushedAt: a.pushedAt, dataUrl: a.dataUrl,
+    type: a.type, name: a.name, pushedAt: a.pushedAt, dataUrl: a.dataUrl, cameraRadius: a.cameraRadius ?? null,
   })));
 });
 
@@ -528,16 +528,16 @@ io.on('connection', (socket) => {
   });
 
   // ── Admin asset push (Blender table / background) ──────────────
-  socket.on('adminPushAsset', ({ secret, type, name, pushedAt, dataUrl }) => {
+  socket.on('adminPushAsset', ({ secret, type, name, pushedAt, dataUrl, cameraRadius }) => {
     if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
     const ts = pushedAt || new Date().toISOString();
-    // Cache so late-joining players can receive current assets
-    if (dataUrl) _pushedAssets[type] = { type, name: name || null, pushedAt: ts, dataUrl };
+    if (dataUrl) _pushedAssets[type] = { type, name: name || null, pushedAt: ts, dataUrl, cameraRadius: cameraRadius ?? null };
     io.emit('assetUpdate', {
       type,
       name: name || null,
       pushedAt: ts,
       dataUrl: dataUrl || null,
+      cameraRadius: cameraRadius ?? null,
     });
     const playerCount = io.sockets.sockets.size;
     io.to('admin').emit('adminAssetPushed', { type, name, tables: playerCount });
