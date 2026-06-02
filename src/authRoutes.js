@@ -2,9 +2,8 @@ const express = require('express');
 const router  = express.Router();
 const { register, login, verifyTokenAsync, getUser, getAllUsers, banUser,
         authMiddleware, verifyEmail, setOTP, verifyOTP, resetPassword, updateStats, updateChips } = require('./auth');
-const fs     = require('fs');
-const path   = require('path');
 const crypto = require('crypto');
+const { queryOne } = require('./db');
 const { sendVerificationEmail, sendOTPEmail, sendPasswordReset, consumeToken } = require('./email');
 
 function generateOTP() {
@@ -265,40 +264,23 @@ router.post('/avatars', async (req, res) => {
 
 
 // ── Daily Login Bonus ──────────────────────────────────────────────────────
-const _DATA_DIR  = process.env.RAILWAY_ENVIRONMENT
-  ? path.join('/tmp', 'rfdata')
-  : path.join(__dirname, '../../data');
-const BONUS_FILE = path.join(_DATA_DIR, 'daily_bonus.json');
 const DAILY_GOLD = 1250;
 
-function loadBonus() {
-  try { return JSON.parse(fs.readFileSync(BONUS_FILE,'utf8')); } catch(_) { return {}; }
-}
-function saveBonus(d) {
+router.get('/daily-bonus/status', authMiddleware, async (req, res) => {
   try {
-    fs.mkdirSync(path.dirname(BONUS_FILE),{recursive:true});
-    fs.writeFileSync(BONUS_FILE, JSON.stringify(d,null,2));
-  } catch(e) { console.error('[Bonus] save failed:', e.message); }
-}
-
-router.get('/daily-bonus/status', authMiddleware, (req, res) => {
-  try {
-    const data   = loadBonus();
-    const record = data[req.user.id] || {};
-    const today  = new Date().toDateString();
-    const claimed = record.lastDay === today;
+    const row = await queryOne('SELECT last_bonus_day FROM users WHERE id = $1', [req.user.id]);
+    const today = new Date().toDateString();
+    const claimed = row?.last_bonus_day === today;
     res.json({ ok: true, claimed, reward: DAILY_GOLD });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
 router.post('/daily-bonus/claim', authMiddleware, async (req, res) => {
   try {
-    const data   = loadBonus();
-    const record = data[req.user.id] || {};
-    const today  = new Date().toDateString();
-    if (record.lastDay === today) return res.status(400).json({ error: 'Already claimed today' });
-    data[req.user.id] = { lastClaim: Date.now(), lastDay: today };
-    saveBonus(data);
+    const today = new Date().toDateString();
+    const row = await queryOne('SELECT last_bonus_day FROM users WHERE id = $1', [req.user.id]);
+    if (row?.last_bonus_day === today) return res.status(400).json({ error: 'Already claimed today' });
+    await queryOne('UPDATE users SET last_bonus_day = $1 WHERE id = $2', [today, req.user.id]);
     await updateChips(req.user.id, 0, DAILY_GOLD).catch(()=>{});
     res.json({ ok: true, reward: DAILY_GOLD });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
