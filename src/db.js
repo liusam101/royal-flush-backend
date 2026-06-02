@@ -100,6 +100,14 @@ async function initDB() {
 
       CREATE INDEX IF NOT EXISTS users_email_idx    ON users(email);
       CREATE INDEX IF NOT EXISTS users_username_idx ON users(username);
+
+      CREATE TABLE IF NOT EXISTS pushed_assets (
+        type          TEXT PRIMARY KEY,
+        name          TEXT,
+        pushed_at     TEXT NOT NULL,
+        data_url      TEXT,
+        camera_radius TEXT
+      );
     `);
     console.log('[DB] Tables ready');
     return true;
