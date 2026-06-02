@@ -14,12 +14,47 @@ const authRouter                        = require('./authRoutes');
 const paymentRouter                     = require('./paymentRoutes');
 const lifetimeStats                     = require('./lifetimeStats');
 const { verifyToken, updateChips }      = require('./auth');
+const { query: dbQuery }                = require('./db');
 
 const app    = express();
 const server = http.createServer(app);
 
-// In-memory store for last-pushed assets (survives reconnects, cleared on restart)
+// In-memory store for last-pushed assets — seeded from DB on startup, persisted on each push
 const _pushedAssets = {};
+
+async function _loadAssetsFromDB() {
+  try {
+    const rows = await dbQuery('SELECT * FROM pushed_assets');
+    rows.forEach(r => {
+      _pushedAssets[r.type] = {
+        type: r.type,
+        name: r.name,
+        pushedAt: r.pushed_at,
+        dataUrl: r.data_url,
+        cameraRadius: r.camera_radius != null ? parseFloat(r.camera_radius) : null,
+      };
+    });
+    console.log(`[Assets] Loaded ${rows.length} asset(s) from DB: ${rows.map(r => r.type).join(', ') || 'none'}`);
+  } catch(e) {
+    console.warn('[Assets] Could not load from DB:', e.message);
+  }
+}
+
+async function _saveAssetToDB(asset) {
+  try {
+    await dbQuery(`
+      INSERT INTO pushed_assets (type, name, pushed_at, data_url, camera_radius)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (type) DO UPDATE SET
+        name = EXCLUDED.name,
+        pushed_at = EXCLUDED.pushed_at,
+        data_url = EXCLUDED.data_url,
+        camera_radius = EXCLUDED.camera_radius
+    `, [asset.type, asset.name ?? null, asset.pushedAt, asset.dataUrl ?? null, asset.cameraRadius != null ? String(asset.cameraRadius) : null]);
+  } catch(e) {
+    console.warn('[Assets] DB save failed:', e.message);
+  }
+}
 const ALLOWED_ORIGINS = [
   'https://royal-flush-frontend.vercel.app',
   'https://barrelpoker.com',
@@ -131,6 +166,7 @@ io.on('connection', (socket) => {
       name: asset.name,
       pushedAt: asset.pushedAt,
       dataUrl: asset.dataUrl,
+      cameraRadius: asset.cameraRadius ?? null,
     });
   });
 
@@ -531,7 +567,10 @@ io.on('connection', (socket) => {
   socket.on('adminPushAsset', ({ secret, type, name, pushedAt, dataUrl, cameraRadius }) => {
     if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
     const ts = pushedAt || new Date().toISOString();
-    if (dataUrl) _pushedAssets[type] = { type, name: name || null, pushedAt: ts, dataUrl, cameraRadius: cameraRadius ?? null };
+    if (dataUrl) {
+      _pushedAssets[type] = { type, name: name || null, pushedAt: ts, dataUrl, cameraRadius: cameraRadius ?? null };
+      _saveAssetToDB(_pushedAssets[type]);
+    }
     io.emit('assetUpdate', {
       type,
       name: name || null,
@@ -580,7 +619,8 @@ antiCheat.on('alert', (alert) => {
 const { initAuth } = require('./auth');
 
 const PORT = process.env.PORT || 3001;
-initAuth().then(() => {
+initAuth().then(async () => {
+  await _loadAssetsFromDB();
   server.listen(PORT, () => console.log(`Royal Flush backend :${PORT}`));
 });
 
