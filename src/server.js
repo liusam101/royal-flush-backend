@@ -143,6 +143,10 @@ function _hookHandName(hole) {
   return hole[0].r + hole[1].r + (hole[0].s === hole[1].s ? ' suited' : '');
 }
 
+// Tracks players who disconnected while seated — keyed by userId.
+// Gives them 60s to reconnect before their seat is removed.
+const pendingRemovals = {};
+
 // ── Socket events ─────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log(`[+] ${socket.id}`);
@@ -173,6 +177,24 @@ io.on('connection', (socket) => {
   // ── Cash game ──────────────────────────────────────────────────
   socket.on('joinTable', (data) => {
     const { tableId, playerName, buyIn } = data;
+
+    // Network-blip reconnect: player has a pending seat at this table
+    if (socket.userId && pendingRemovals[socket.userId]) {
+      const pr = pendingRemovals[socket.userId];
+      const reconnected = tableManager.reconnectPlayer(tableId, pr.socketId, socket.id);
+      if (reconnected) {
+        clearTimeout(pr.timer);
+        delete pendingRemovals[socket.userId];
+        socket.offTableChips = pr.offTableChips;
+        socket.join(tableId);
+        console.log(`    ${playerName} reconnected → ${tableId} seat${reconnected.seat}`);
+        socket.emit('joinedTable', { tableId, seat: reconnected.seat });
+        io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+        if (reconnected.cards?.length) socket.emit('dealCards', { cards: reconnected.cards });
+        return;
+      }
+    }
+
     const ip = socket.handshake.headers['x-forwarded-for']?.split(',')[0]?.trim()
              || socket.handshake.address || 'unknown';
     const fp = socket.handshake.auth?.fingerprint
@@ -577,7 +599,7 @@ io.on('connection', (socket) => {
   socket.on('adminKickPlayer', ({ secret, socketId, reason }) => {
     if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
     io.to(socketId).emit('kicked', { reason: reason || 'Removed by admin' });
-    const affected = tableManager.removePlayer(socketId);
+    const { affected } = tableManager.removePlayer(socketId);
     affected.forEach(tid => io.to(tid).emit('tableState', tableManager.getTableState(tid)));
   });
 
@@ -605,12 +627,48 @@ io.on('connection', (socket) => {
     console.log(`[-] ${socket.id}`);
     antiCheat.onLeaveTable(socket.id);
     antiCheat.onDisconnect(socket.id);
-    const affected = tableManager.removePlayer(socket.id);
-    affected.forEach(tid => io.to(tid).emit('tableState', tableManager.getTableState(tid)));
-    // Restore off-table portion to DB if player disconnected mid-session
-    if (socket.userId && socket.offTableChips != null && socket.offTableChips > 0) {
-      await updateChips(socket.userId, socket.offTableChips, 0).catch(() => {});
-      socket.offTableChips = null;
+
+    // Mark as sitting-out instead of removing immediately — fold current turn if needed
+    const atTable = tableManager.markDisconnected(socket.id);
+    atTable.forEach(tid => io.to(tid).emit('tableState', tableManager.getTableState(tid)));
+
+    if (atTable.length > 0 && socket.userId) {
+      // Authenticated player at a table — 60s grace period to reconnect
+      if (pendingRemovals[socket.userId]) clearTimeout(pendingRemovals[socket.userId].timer);
+      const savedSocketId  = socket.id;
+      const savedUserId    = socket.userId;
+      const savedOffTable  = socket.offTableChips ?? 0;
+      pendingRemovals[savedUserId] = {
+        socketId:      savedSocketId,
+        offTableChips: savedOffTable,
+        timer: setTimeout(async () => {
+          delete pendingRemovals[savedUserId];
+          const { affected, stack } = tableManager.removePlayer(savedSocketId);
+          affected.forEach(tid => {
+            io.to(tid).emit('tableState', tableManager.getTableState(tid));
+            setTimeout(() => tryStartNewHand(tid), 1500);
+          });
+          const total = savedOffTable + stack;
+          if (total > 0) await updateChips(savedUserId, total, 0).catch(() => {});
+          console.log(`    [DC] ${savedSocketId} timed out — seat removed, returned $${total.toFixed(2)}`);
+        }, 60000),
+      };
+      console.log(`    [DC] ${socket.id} sitting out (60s to reconnect)`);
+    } else if (atTable.length > 0) {
+      // Guest at table — remove after 60s, no chip restoration
+      const savedSocketId = socket.id;
+      setTimeout(() => {
+        const { affected } = tableManager.removePlayer(savedSocketId);
+        affected.forEach(tid => {
+          io.to(tid).emit('tableState', tableManager.getTableState(tid));
+          setTimeout(() => tryStartNewHand(tid), 1500);
+        });
+      }, 60000);
+    } else {
+      // Not at a table — restore off-table chips right away
+      if (socket.userId && socket.offTableChips != null && socket.offTableChips > 0) {
+        await updateChips(socket.userId, socket.offTableChips, 0).catch(() => {});
+      }
     }
   });
 });
