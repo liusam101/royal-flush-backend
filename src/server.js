@@ -13,8 +13,8 @@ const adminRouter                       = require('./adminRoutes');
 const authRouter                        = require('./authRoutes');
 const paymentRouter                     = require('./paymentRoutes');
 const lifetimeStats                     = require('./lifetimeStats');
-const { verifyToken, updateChips }      = require('./auth');
-const { query: dbQuery }                = require('./db');
+const { verifyToken, updateChips, updateStats } = require('./auth');
+const { query: dbQuery }                       = require('./db');
 
 const app    = express();
 const server = http.createServer(app);
@@ -188,6 +188,11 @@ io.on('connection', (socket) => {
     const result = tableManager.joinTable(tableId, socket.id, playerName, buyIn);
     if (!result.ok) { socket.emit('error', { message: result.error }); return; }
 
+    // Track how much is left off-table so leaveTable can restore it correctly
+    if (socket.userId) {
+      socket.offTableChips = Math.max(0, (socket.chips || 0) - buyIn);
+    }
+
     socket.join(tableId);
     console.log(`    ${playerName} → ${tableId} seat${result.seat}`);
     socket.emit('joinedTable', { tableId, seat: result.seat });
@@ -265,6 +270,7 @@ io.on('connection', (socket) => {
       handHistory.endHand(tableId, hr);
       const finalState = tableManager.getTableState(tableId);
       if (finalState?.seats) {
+        const isShowdown = hr?.reason === 'showdown';
         for (const seat of finalState.seats) {
           const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
           if (skt?.userId) {
@@ -273,6 +279,15 @@ io.on('connection', (socket) => {
               await updateChips(skt.userId, delta, 0);
               skt.chips = seat.stack;
             }
+            const isWinner = seat.name === hr?.winner;
+            updateStats(skt.userId, {
+              handPlayed: 1,
+              won: isWinner ? 1 : 0,
+              amountWon: isWinner ? (hr?.amount || 0) : 0,
+              amountLost: 0,
+              showdownWin: isShowdown && isWinner ? 1 : 0,
+              showdownPlayed: isShowdown ? 1 : 0,
+            }).catch(() => {});
           }
         }
       }
@@ -298,13 +313,16 @@ io.on('connection', (socket) => {
     antiCheat.onLeaveTable(socket.id);
     io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
 
-    if (socket.userId && returnedStack > 0) {
-      const delta = returnedStack - (socket.chips || 0);
+    if (socket.userId) {
+      // True balance = what was left off-table + what they're cashing out with
+      const trueBalance = (socket.offTableChips ?? 0) + returnedStack;
+      const delta = trueBalance - (socket.chips || 0);
       if (Math.abs(delta) > 0.001) {
         await updateChips(socket.userId, delta, 0);
       }
-      socket.chips = returnedStack;
-      socket.emit('chipsReturned', { balance: returnedStack });
+      socket.offTableChips = null;
+      socket.chips = trueBalance;
+      socket.emit('chipsReturned', { balance: trueBalance });
     }
   });
   socket.on('chatMessage', ({ tableId, playerName, message }) => {
@@ -583,12 +601,17 @@ io.on('connection', (socket) => {
     console.log(`[Assets] Admin pushed ${type} "${name||'?'}" (${dataUrl ? Math.round(dataUrl.length/1024)+'KB' : 'no data'}) → ${playerCount} clients`);
   });
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     console.log(`[-] ${socket.id}`);
     antiCheat.onLeaveTable(socket.id);
     antiCheat.onDisconnect(socket.id);
     const affected = tableManager.removePlayer(socket.id);
     affected.forEach(tid => io.to(tid).emit('tableState', tableManager.getTableState(tid)));
+    // Restore off-table portion to DB if player disconnected mid-session
+    if (socket.userId && socket.offTableChips != null && socket.offTableChips > 0) {
+      await updateChips(socket.userId, socket.offTableChips, 0).catch(() => {});
+      socket.offTableChips = null;
+    }
   });
 });
 
