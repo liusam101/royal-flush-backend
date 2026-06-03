@@ -238,13 +238,15 @@ const tableManager = {
 
   removePlayer(socketId) {
     const affected = [];
+    let totalStack = 0;
     Object.keys(tables).forEach(tid => {
       if (tables[tid].seats.find(s => s.socketId === socketId)) {
-        this.leaveTable(tid, socketId);
+        const result = this.leaveTable(tid, socketId);
+        totalStack += result?.stack || 0;
         affected.push(tid);
       }
     });
-    return affected;
+    return { affected, stack: totalStack };
   },
 
   setSitOut(tableId, socketId, sitOut) {
@@ -252,6 +254,39 @@ const tableManager = {
     if (!t) return;
     const seat = t.seats.find(s => s.socketId === socketId);
     if (seat) seat.sitOut = sitOut;
+  },
+
+  // Mark as sitting out + disconnected without removing from the table.
+  // If it's their turn right now, fold immediately so the hand continues.
+  markDisconnected(socketId) {
+    const affected = [];
+    Object.keys(tables).forEach(tid => {
+      const t = tables[tid];
+      const seatIdx = t.seats.findIndex(s => s.socketId === socketId);
+      if (seatIdx === -1) return;
+      const seat = t.seats[seatIdx];
+      seat.sitOut = true;
+      seat.disconnected = true;
+      if (!seat.folded && seatIdx === t.actIdx &&
+          t.phase !== 'waiting' && t.phase !== 'starting') {
+        if (seat._autoFoldTimer) { clearTimeout(seat._autoFoldTimer); seat._autoFoldTimer = null; }
+        this.handleAction(tid, socketId, 'fold', 0);
+      }
+      affected.push(tid);
+    });
+    return affected;
+  },
+
+  // Re-attach a reconnecting player's new socket to their existing seat.
+  reconnectPlayer(tableId, oldSocketId, newSocketId) {
+    const t = tables[tableId];
+    if (!t) return null;
+    const seat = t.seats.find(s => s.socketId === oldSocketId && s.disconnected);
+    if (!seat) return null;
+    seat.socketId = newSocketId;
+    seat.sitOut = false;
+    seat.disconnected = false;
+    return { seat: seat.seat, cards: seat.cards || [] };
   },
 
   handleAction(tableId, socketId, action, amount) {
