@@ -315,7 +315,7 @@ async function updateStats(userId, stats) {
       showdown_total = showdown_total + $10
       WHERE id=$11`,
       [stats.handPlayed||0, stats.won||0, stats.amountWon||0, stats.amountLost||0,
-       stats.vpip||0, stats.pfr?1:0||0, stats.pfr||0, stats.pfr?1:0||0,
+       stats.vpip||0, stats.handPlayed||0, stats.pfr||0, stats.handPlayed||0,
        stats.showdownWin||0, stats.showdownPlayed||0, userId]);
   } else {
     const users = loadUsers();
