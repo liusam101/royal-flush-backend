@@ -258,23 +258,29 @@ const tableManager = {
 
   // Mark as sitting out + disconnected without removing from the table.
   // If it's their turn right now, fold immediately so the hand continues.
+  // Returns { affected: [tableId,...], handResults: [{ tableId, handResult },…] }
+  // so the caller can emit handResult events for any hands that just ended.
   markDisconnected(socketId) {
-    const affected = [];
+    const affected    = [];
+    const handResults = [];
     Object.keys(tables).forEach(tid => {
       const t = tables[tid];
       const seatIdx = t.seats.findIndex(s => s.socketId === socketId);
       if (seatIdx === -1) return;
       const seat = t.seats[seatIdx];
-      seat.sitOut = true;
+      seat.sitOut      = true;
       seat.disconnected = true;
       if (!seat.folded && seatIdx === t.actIdx &&
           t.phase !== 'waiting' && t.phase !== 'starting') {
         if (seat._autoFoldTimer) { clearTimeout(seat._autoFoldTimer); seat._autoFoldTimer = null; }
-        this.handleAction(tid, socketId, 'fold', 0);
+        const result = this.handleAction(tid, socketId, 'fold', 0);
+        if (result?.handOver && result?.handResult) {
+          handResults.push({ tableId: tid, handResult: result.handResult });
+        }
       }
       affected.push(tid);
     });
-    return affected;
+    return { affected, handResults };
   },
 
   // Re-attach a reconnecting player's new socket to their existing seat.
@@ -505,8 +511,8 @@ const tableManager = {
         actor._autoFoldTimer = setTimeout(() => {
           actor._autoFoldTimer = null;
           if (actor.sitOut && !actor.folded && t.seats[t.actIdx] === actor) {
-            this.handleAction(tableId, actor.socketId, 'fold', 0);
-            if (t._onAutoFold) t._onAutoFold(tableId);
+            const result = this.handleAction(tableId, actor.socketId, 'fold', 0);
+            if (t._onAutoFold) t._onAutoFold(tableId, result);
           }
         }, 20000);
       }
