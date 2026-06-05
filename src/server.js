@@ -628,29 +628,57 @@ io.on('connection', (socket) => {
     antiCheat.onLeaveTable(socket.id);
     antiCheat.onDisconnect(socket.id);
 
-    // Mark as sitting-out instead of removing immediately — fold current turn if needed
-    const atTable = tableManager.markDisconnected(socket.id);
+    // Mark as sitting-out instead of removing immediately — folds current turn if needed.
+    // Returns { affected, handResults } so we can emit any hands that ended as a result.
+    const { affected: atTable, handResults } = tableManager.markDisconnected(socket.id);
     atTable.forEach(tid => io.to(tid).emit('tableState', tableManager.getTableState(tid)));
 
+    // Emit and settle any hand that ended because of the immediate fold
+    for (const { tableId, handResult: hr } of handResults) {
+      io.to(tableId).emit('handResult', hr);
+      handHistory.endHand(tableId, hr);
+      const finalState = tableManager.getTableState(tableId);
+      if (finalState?.seats) {
+        for (const seat of finalState.seats) {
+          const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
+          if (skt?.userId) {
+            const delta = seat.stack - (skt.chips || 0);
+            if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = seat.stack; }
+            const isWinner = seat.name === hr?.winner;
+            updateStats(skt.userId, { handPlayed: 1, won: isWinner ? 1 : 0,
+              amountWon: isWinner ? (hr?.amount || 0) : 0, amountLost: 0,
+              showdownWin: 0, showdownPlayed: 0 }).catch(() => {});
+          }
+        }
+      }
+      setTimeout(() => tryStartNewHand(tableId), 3500);
+    }
+
     if (atTable.length > 0 && socket.userId) {
-      // Authenticated player at a table — 60s grace period to reconnect
+      // Authenticated player at a table — 60s grace period to reconnect.
+      // Capture chips baseline now (socket object goes away after this handler).
       if (pendingRemovals[socket.userId]) clearTimeout(pendingRemovals[socket.userId].timer);
       const savedSocketId  = socket.id;
       const savedUserId    = socket.userId;
       const savedOffTable  = socket.offTableChips ?? 0;
+      const savedChips     = socket.chips || 0; // last-synced DB balance
       pendingRemovals[savedUserId] = {
         socketId:      savedSocketId,
         offTableChips: savedOffTable,
         timer: setTimeout(async () => {
           delete pendingRemovals[savedUserId];
           const { affected, stack } = tableManager.removePlayer(savedSocketId);
-          affected.forEach(tid => {
-            io.to(tid).emit('tableState', tableManager.getTableState(tid));
-            setTimeout(() => tryStartNewHand(tid), 1500);
-          });
-          const total = savedOffTable + stack;
-          if (total > 0) await updateChips(savedUserId, total, 0).catch(() => {});
-          console.log(`    [DC] ${savedSocketId} timed out — seat removed, returned $${total.toFixed(2)}`);
+          if (affected.length > 0) {
+            affected.forEach(tid => {
+              io.to(tid).emit('tableState', tableManager.getTableState(tid));
+              setTimeout(() => tryStartNewHand(tid), 1500);
+            });
+            // Compute delta from the DB baseline so we don't add chips incorrectly
+            const trueBalance = savedOffTable + stack;
+            const delta = trueBalance - savedChips;
+            if (Math.abs(delta) > 0.001) await updateChips(savedUserId, delta, 0).catch(() => {});
+            console.log(`    [DC] ${savedSocketId} timed out — seat removed, balance $${trueBalance.toFixed(2)}`);
+          }
         }, 60000),
       };
       console.log(`    [DC] ${socket.id} sitting out (60s to reconnect)`);
@@ -673,15 +701,38 @@ io.on('connection', (socket) => {
   });
 });
 
-// Auto-fold callbacks
+// Auto-fold callbacks — fired when a sit-out player's 20s timer expires.
+// result is the return value of handleAction (may be handOver:true).
 ['midnight-velvet','cursed-domain','grand-royal'].forEach(tableId => {
-  tableManager.onAutoFold(tableId, (tid) => {
-    const state = tableManager.getTableState(tid);
-    if (!state) return;
-    io.to(tid).emit('tableState', state);
-    if (state.phase === 'starting' || state.phase === 'waiting') {
-      setTimeout(() => tryStartNewHand(tid), 3500);
-    }
+  tableManager.onAutoFold(tableId, async (tid, result) => {
+    try {
+      const state = tableManager.getTableState(tid);
+      if (!state) return;
+      io.to(tid).emit('tableState', state);
+
+      if (result?.handOver && result?.handResult) {
+        const hr = result.handResult;
+        io.to(tid).emit('handResult', hr);
+        handHistory.endHand(tid, hr);
+        const finalState = tableManager.getTableState(tid);
+        if (finalState?.seats) {
+          for (const seat of finalState.seats) {
+            const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
+            if (skt?.userId) {
+              const delta = seat.stack - (skt.chips || 0);
+              if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = seat.stack; }
+              const isWinner = seat.name === hr?.winner;
+              updateStats(skt.userId, { handPlayed: 1, won: isWinner ? 1 : 0,
+                amountWon: isWinner ? (hr?.amount || 0) : 0, amountLost: 0,
+                showdownWin: 0, showdownPlayed: 0 }).catch(() => {});
+            }
+          }
+        }
+        setTimeout(() => tryStartNewHand(tid), 3500);
+      } else if (state.phase === 'starting' || state.phase === 'waiting') {
+        setTimeout(() => tryStartNewHand(tid), 3500);
+      }
+    } catch(e) { console.error('[AutoFold]', e.message); }
   });
 });
 
