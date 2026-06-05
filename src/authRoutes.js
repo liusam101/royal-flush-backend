@@ -62,7 +62,7 @@ router.get('/me', authMiddleware, async (req, res) => {
 // ── Email verification (link-based — legacy fallback) ─────────────────────
 router.post('/verify-email', async (req, res) => {
   try {
-    const result = consumeToken(req.body.token, 'verify');
+    const result = await consumeToken(req.body.token, 'verify');
     if (!result.ok) return res.status(400).json({ error: result.error });
     await verifyEmail(result.userId);
     res.json({ ok: true, message: 'Email verified successfully!' });
@@ -112,7 +112,7 @@ router.post('/reset-password', async (req, res) => {
   try {
     const { token, password } = req.body;
     if (!token || !password) return res.status(400).json({ error: 'Token and password required.' });
-    const result = consumeToken(token, 'reset');
+    const result = await consumeToken(token, 'reset');
     if (!result.ok) return res.status(400).json({ error: result.error });
     const reset = await resetPassword(result.userId, password);
     if (!reset.ok) return res.status(400).json({ error: reset.error });
