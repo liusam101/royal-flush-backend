@@ -6,7 +6,8 @@
 const nodemailer = require('nodemailer');
 const crypto     = require('crypto');
 
-// Token store — in production use Redis; JSON file for now
+// Token store — PostgreSQL in production, JSON file fallback for local dev
+const db   = require('./db');
 const fs   = require('fs');
 const path = require('path');
 const DATA_DIR    = process.env.RAILWAY_ENVIRONMENT
@@ -52,25 +53,53 @@ const SITE_URL = process.env.SITE_URL || 'https://royal-flush-frontend.vercel.ap
 const FROM     = process.env.EMAIL_FROM || '"Royal Flush" <noreply@royalflush.io>';
 const TOKEN_TTL = 3600000; // 1 hour
 
-// ── Generate a secure token ────────────────────────────────────────────────
-function makeToken(type, userId, email) {
-  const token   = crypto.randomBytes(32).toString('hex');
-  const tokens  = loadTokens();
-  // Invalidate any existing tokens of same type for this user
+// ── Token storage — DB-backed with file fallback ───────────────────────────
+async function makeToken(type, userId, email) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const now   = Date.now();
+  try {
+    if (db.getPool()) {
+      await db.query('DELETE FROM email_tokens WHERE user_id=$1 AND type=$2', [userId, type]);
+      await db.query(
+        'INSERT INTO email_tokens (token,type,user_id,email,created_at,used) VALUES ($1,$2,$3,$4,$5,false)',
+        [token, type, userId, email, now]
+      );
+      return token;
+    }
+  } catch(e) {
+    console.warn('[Email] DB token save failed, using file fallback:', e.message);
+  }
+  // Local-dev file fallback
+  const tokens = loadTokens();
   Object.keys(tokens).forEach(k => {
     if (tokens[k].userId === userId && tokens[k].type === type) delete tokens[k];
   });
-  tokens[token] = { type, userId, email, createdAt: Date.now(), used: false };
-  try { saveTokens(tokens); } catch(e) { console.error('[Email] token save failed:', e.message); }
+  tokens[token] = { type, userId, email, createdAt: now, used: false };
+  saveTokens(tokens);
   return token;
 }
 
-function consumeToken(token, type) {
+async function consumeToken(token, type) {
+  try {
+    if (db.getPool()) {
+      const entry = await db.queryOne('SELECT * FROM email_tokens WHERE token=$1', [token]);
+      if (!entry)              return { ok: false, error: 'Invalid or expired link.' };
+      if (entry.type !== type) return { ok: false, error: 'Wrong token type.' };
+      if (entry.used)          return { ok: false, error: 'This link has already been used.' };
+      if (Date.now() - parseInt(entry.created_at) > TOKEN_TTL)
+        return { ok: false, error: 'This link has expired. Please request a new one.' };
+      await db.query('UPDATE email_tokens SET used=true WHERE token=$1', [token]);
+      return { ok: true, userId: entry.user_id, email: entry.email };
+    }
+  } catch(e) {
+    console.warn('[Email] DB token consume failed, using file fallback:', e.message);
+  }
+  // Local-dev file fallback
   const tokens = loadTokens();
   const entry  = tokens[token];
-  if (!entry) return { ok: false, error: 'Invalid or expired link.' };
+  if (!entry)              return { ok: false, error: 'Invalid or expired link.' };
   if (entry.type !== type) return { ok: false, error: 'Wrong token type.' };
-  if (entry.used)  return { ok: false, error: 'This link has already been used.' };
+  if (entry.used)          return { ok: false, error: 'This link has already been used.' };
   if (Date.now() - entry.createdAt > TOKEN_TTL)
     return { ok: false, error: 'This link has expired. Please request a new one.' };
   entry.used = true;
@@ -97,7 +126,7 @@ async function sendMail({ to, subject, html, text }) {
 
 // ── EMAIL VERIFICATION ─────────────────────────────────────────────────────
 async function sendVerificationEmail(userId, email, username) {
-  const token = makeToken('verify', userId, email);
+  const token = await makeToken('verify', userId, email);
   const url   = `${SITE_URL}/rf.html?verify=${token}`;
   return sendMail({
     to:      email,
@@ -139,7 +168,7 @@ async function sendOTPEmail(userId, email, username, code) {
 
 // ── PASSWORD RESET ─────────────────────────────────────────────────────────
 async function sendPasswordReset(userId, email, username) {
-  const token = makeToken('reset', userId, email);
+  const token = await makeToken('reset', userId, email);
   const url   = `${SITE_URL}/rf.html?reset=${token}`;
   return sendMail({
     to:      email,
