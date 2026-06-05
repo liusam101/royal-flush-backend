@@ -108,6 +108,15 @@ async function initDB() {
         data_url      TEXT,
         camera_radius TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS email_tokens (
+        token      TEXT PRIMARY KEY,
+        type       TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        email      TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        used       BOOLEAN DEFAULT FALSE
+      );
     `);
     console.log('[DB] Tables ready');
     return true;
