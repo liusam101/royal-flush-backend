@@ -12,6 +12,8 @@ function generateOTP() {
 }
 const { antiCheat } = require('./antiCheat');
 
+const _otpCooldown = new Map(); // userId → timestamp of last send
+
 // ── Register ──────────────────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
   try {
@@ -83,6 +85,10 @@ router.post('/verify-otp', authMiddleware, async (req, res) => {
 // ── Resend verification (OTP) ─────────────────────────────────────────────
 router.post('/resend-verification', authMiddleware, async (req, res) => {
   try {
+    const last = _otpCooldown.get(req.user.id) || 0;
+    if (Date.now() - last < 60_000)
+      return res.status(429).json({ error: 'Please wait 60 seconds before requesting another code.' });
+    _otpCooldown.set(req.user.id, Date.now());
     const user = await getUser(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (user.emailVerified) return res.json({ ok: true, message: 'Already verified.' });
