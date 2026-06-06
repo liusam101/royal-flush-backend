@@ -50,7 +50,7 @@ function getTransport() {
 }
 
 const SITE_URL = process.env.SITE_URL || 'https://barrelpoker.com';
-const FROM     = process.env.EMAIL_FROM || '"Royal Flush" <noreply@royalflush.io>';
+const FROM     = process.env.EMAIL_FROM || '"Barrel Poker" <noreply@barrelpoker.com>';
 const TOKEN_TTL = 3600000; // 1 hour
 
 // ── Token storage — DB-backed with file fallback ───────────────────────────
