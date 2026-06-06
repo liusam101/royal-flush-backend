@@ -3,7 +3,7 @@ const router  = express.Router();
 const { register, login, verifyTokenAsync, getUser, getAllUsers, banUser,
         authMiddleware, verifyEmail, setOTP, verifyOTP, resetPassword, updateStats, updateChips } = require('./auth');
 const crypto = require('crypto');
-const { queryOne } = require('./db');
+const { query: dbQuery, queryOne } = require('./db');
 const { sendVerificationEmail, sendOTPEmail, sendPasswordReset, consumeToken } = require('./email');
 
 function generateOTP() {
@@ -98,8 +98,11 @@ router.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'Email required.' });
-    const users = await getAllUsers();
-    const user  = users.find(u => u.email === email.toLowerCase());
+    // Direct indexed query — no full table scan
+    const user = await queryOne(
+      'SELECT id, email, username FROM users WHERE email=$1 AND banned=false',
+      [email.toLowerCase()]
+    );
     if (user) {
       await sendPasswordReset(user.id, user.email, user.username);
     }
@@ -278,9 +281,12 @@ router.get('/daily-bonus/status', authMiddleware, async (req, res) => {
 router.post('/daily-bonus/claim', authMiddleware, async (req, res) => {
   try {
     const today = new Date().toDateString();
-    const row = await queryOne('SELECT last_bonus_day FROM users WHERE id = $1', [req.user.id]);
-    if (row?.last_bonus_day === today) return res.status(400).json({ error: 'Already claimed today' });
-    await queryOne('UPDATE users SET last_bonus_day = $1 WHERE id = $2', [today, req.user.id]);
+    // Atomic update — prevents double-claim from race conditions
+    const rows = await dbQuery(
+      'UPDATE users SET last_bonus_day=$1 WHERE id=$2 AND (last_bonus_day IS DISTINCT FROM $1) RETURNING id',
+      [today, req.user.id]
+    );
+    if (!rows.length) return res.status(400).json({ error: 'Already claimed today' });
     await updateChips(req.user.id, 0, DAILY_GOLD).catch(()=>{});
     res.json({ ok: true, reward: DAILY_GOLD });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
