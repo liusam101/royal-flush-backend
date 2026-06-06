@@ -178,7 +178,7 @@ io.on('connection', async (socket) => {
   });
 
   // ── Cash game ──────────────────────────────────────────────────
-  socket.on('joinTable', (data) => {
+  socket.on('joinTable', async (data) => {
     const { tableId, playerName, buyIn } = data;
 
     // Network-blip reconnect: player has a pending seat at this table
