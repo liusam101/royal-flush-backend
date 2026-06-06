@@ -8,7 +8,8 @@ const crypto = require('crypto');
 const fs     = require('fs');
 const path   = require('path');
 
-const JWT_SECRET  = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
+const JWT_SECRET  = process.env.JWT_SECRET || 'rf_jwt_dev_secret_change_in_production';
+if (!process.env.JWT_SECRET) console.warn('[Auth] JWT_SECRET not set — using insecure default. Set JWT_SECRET env var in production.');
 const JWT_EXPIRY  = '30d';
 const SALT_ROUNDS = 12;
 
@@ -47,7 +48,7 @@ function safeUser(u) {
     username:      u.username,
     email:         u.email,
     chips:         parseFloat(u.chips != null ? u.chips : (u.chips_royal != null ? u.chips_royal : 10)),
-    goldChips:     parseInt(u.gold_chips || u.goldChips || 250000),
+    goldChips:     u.gold_chips != null ? parseInt(u.gold_chips) : (u.goldChips != null ? parseInt(u.goldChips) : 250000),
     createdAt:     parseInt(u.created_at || u.createdAt || Date.now()),
     lastLogin:     parseInt(u.last_login || u.lastLogin || Date.now()),
     banned:        !!u.banned,
