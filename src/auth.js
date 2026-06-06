@@ -337,13 +337,13 @@ async function updateStats(userId, stats) {
   }
 }
 
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer '))
     return res.status(401).json({ error: 'No token provided' });
-  const decoded = verifyToken(header.slice(7));
-  if (!decoded) return res.status(401).json({ error: 'Invalid or expired token' });
-  req.user = decoded;
+  const user = await verifyTokenAsync(header.slice(7));
+  if (!user) return res.status(401).json({ error: 'Invalid or expired token' });
+  req.user = user;
   next();
 }
 
