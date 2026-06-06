@@ -197,25 +197,13 @@ const tableManager = {
     if (!t) return;
     // No waiting list — new tables spawn automatically when full
 
-    // If hand is in progress and there's a pot, award it to remaining player
+    // If hand is in progress and there's a pot, award it to the remaining active player.
+    // The pot already includes all bets — award it directly without re-adding individual bets.
     const inProgress = t.phase !== 'waiting' && t.phase !== 'starting';
     if (inProgress && t.pot > 0) {
-      // Refund everyone's bets back to their stacks before clearing
-      t.seats.forEach(s => {
-        if (s.socketId !== socketId) {
-          // Remaining players get their bets back + the pot
-          s.stack += s.bet || 0;
-        }
-        // Give pot to first remaining non-leaving player
-      });
-      // Award pot to first remaining player who isn't leaving
       const remaining = t.seats.filter(s => s.socketId !== socketId && !s.folded);
-      if (remaining.length === 1) {
+      if (remaining.length >= 1) {
         remaining[0].stack += t.pot;
-      } else if (remaining.length > 1) {
-        // Multiple players remain — just refund everyone's bets
-        remaining.forEach(s => { /* already done above */ });
-        remaining[0].stack += t.pot; // give pot to first active
       }
       t.pot = 0;
     }
@@ -480,6 +468,8 @@ const tableManager = {
       const bb = Math.min(t.bb, t.seats[bbIdx].stack);
       t.seats[sbIdx].stack -= sb; t.seats[sbIdx].bet = sb; t.seats[sbIdx].totalBet = sb; t.pot += sb;
       t.seats[bbIdx].stack -= bb; t.seats[bbIdx].bet = bb; t.seats[bbIdx].totalBet = bb; t.pot += bb;
+      // If BB is all-in from posting the blind, they've had their "option" by definition
+      if (t.seats[bbIdx].stack === 0) t.preflopBBActed = true;
       t.actIdx = sbIdx;
     } else {
       const sbIdx = (t.dealerIdx + 1) % n;
@@ -489,6 +479,8 @@ const tableManager = {
       const bb = Math.min(t.bb, t.seats[bbIdx].stack);
       t.seats[sbIdx].stack -= sb; t.seats[sbIdx].bet = sb; t.seats[sbIdx].totalBet = sb; t.pot += sb;
       t.seats[bbIdx].stack -= bb; t.seats[bbIdx].bet = bb; t.seats[bbIdx].totalBet = bb; t.pot += bb;
+      // If BB is all-in from posting the blind, they've had their "option" by definition
+      if (t.seats[bbIdx].stack === 0) t.preflopBBActed = true;
       t.actIdx = (bbIdx + 1) % n;
     }
     console.log(`    [${tableId}] Hand — ${t.seats.map(s=>s.name).join(' vs ')} | pot=$${t.pot}`);
