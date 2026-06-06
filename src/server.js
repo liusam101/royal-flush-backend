@@ -13,7 +13,8 @@ const adminRouter                       = require('./adminRoutes');
 const authRouter                        = require('./authRoutes');
 const paymentRouter                     = require('./paymentRoutes');
 const lifetimeStats                     = require('./lifetimeStats');
-const { verifyToken, updateChips, updateStats } = require('./auth');
+const { verifyTokenAsync, updateChips, updateStats } = require('./auth');
+const rg = require('./responsibleGambling');
 const { query: dbQuery }                       = require('./db');
 
 const app    = express();
@@ -148,19 +149,21 @@ function _hookHandName(hole) {
 const pendingRemovals = {};
 
 // ── Socket events ─────────────────────────────────────────────────
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   console.log(`[+] ${socket.id}`);
 
-  // Verify JWT token on socket connect (optional — player can still join as guest)
+  // Verify JWT token on socket connect — use async version so we get real DB chips balance
   const token = socket.handshake.auth?.token;
   if (token) {
-    const user = verifyToken(token);
-    if (user) {
-      socket.userId   = user.id;
-      socket.username = user.username;
-      socket.chips    = user.chips;
-      console.log(`    Auth: ${user.username} (${user.id})`);
-    }
+    try {
+      const user = await verifyTokenAsync(token);
+      if (user) {
+        socket.userId   = user.id;
+        socket.username = user.username;
+        socket.chips    = user.chips; // real DB balance, not undefined
+        console.log(`    Auth: ${user.username} (${user.id}) chips=$${user.chips}`);
+      }
+    } catch(e) { /* invalid token — socket stays unauthenticated */ }
   }
 
   // Deliver any previously pushed assets to this newly connecting client
@@ -205,6 +208,15 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Access denied: ' + acCheck.reason });
       console.warn(`[AntiCheat] BLOCKED ${playerName} from ${ip}: ${acCheck.reason}`);
       return;
+    }
+
+    // Responsible gambling check — enforce self-exclusion, cooloff, session/loss limits
+    if (socket.userId) {
+      const rgCheck = await rg.checkRGLimits(socket.userId, buyIn);
+      if (!rgCheck.ok) {
+        socket.emit('error', { message: rgCheck.reason || 'Access restricted by responsible gambling limits.' });
+        return;
+      }
     }
 
     const result = tableManager.joinTable(tableId, socket.id, playerName, buyIn);
@@ -370,7 +382,7 @@ io.on('connection', (socket) => {
   });
 
   // ── Sit & Go ────────────────────────────────────────────────────
-  socket.on('sngJoin', ({ sngId, playerName, buyIn, max, rake, startingStack, name }) => {
+  socket.on('sngJoin', async ({ sngId, playerName, buyIn, max, rake, startingStack, name }) => {
     let tourn = tournamentEngine.getAll().find(t =>
       t.status === 'registering' &&
       t.sngId === sngId &&
@@ -392,6 +404,13 @@ io.on('connection', (socket) => {
 
     const result = tournamentEngine.register(tourn.id, socket.id, playerName);
     if (!result.ok) { socket.emit('error', { message: result.error }); return; }
+
+    // Debit buy-in from real balance so SNG chips aren't free
+    const actualBuyIn = tourn.buyIn || buyIn || 0;
+    if (socket.userId && actualBuyIn > 0) {
+      await updateChips(socket.userId, -actualBuyIn, 0).catch(() => {});
+      socket.chips = Math.max(0, (socket.chips || 0) - actualBuyIn);
+    }
 
     socket.join('tourn_' + tourn.id);
     socket.emit('sngRegistered', { tournId: tourn.id, registered: result.registered, max: tourn.maxPlayers });
