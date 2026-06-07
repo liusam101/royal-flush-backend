@@ -198,14 +198,16 @@ const tableManager = {
     // No waiting list — new tables spawn automatically when full
 
     // If hand is in progress and there's a pot, award it to the remaining active player.
-    // The pot already includes all bets — award it directly without re-adding individual bets.
     const inProgress = t.phase !== 'waiting' && t.phase !== 'starting';
+    let handResult = null;
     if (inProgress && t.pot > 0) {
       const remaining = t.seats.filter(s => s.socketId !== socketId && !s.folded);
       if (remaining.length >= 1) {
+        handResult = { winner: remaining[0].name, amount: t.pot, reason: 'opponent left' };
         remaining[0].stack += t.pot;
       }
       t.pot = 0;
+      this._resetHand(tableId);
     }
 
     // Clear any auto-fold timers for the leaving player
@@ -221,7 +223,7 @@ const tableManager = {
     }
     if (t.actIdx    >= t.seats.length) t.actIdx    = 0;
     if (t.dealerIdx >= t.seats.length) t.dealerIdx = 0;
-    return { stack: returnedStack };
+    return { stack: returnedStack, handResult };
   },
 
   removePlayer(socketId) {
