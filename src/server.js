@@ -222,8 +222,8 @@ io.on('connection', async (socket) => {
     const result = tableManager.joinTable(tableId, socket.id, playerName, buyIn);
     if (!result.ok) { socket.emit('error', { message: result.error }); return; }
 
-    // Track how much is left off-table so leaveTable can restore it correctly
-    if (socket.userId) {
+    // Track off-table chips only on first join, not on rejoin (reconnect path returns alreadyJoined)
+    if (socket.userId && !result.alreadyJoined) {
       socket.offTableChips = Math.max(0, (socket.chips || 0) - buyIn);
     }
 
@@ -233,6 +233,7 @@ io.on('connection', async (socket) => {
 
     const currentState = tableManager.getTableState(tableId);
     io.to(tableId).emit('tableState', currentState);
+    io.emit('tableListUpdated');  // refresh lobby player counts for all clients
 
     const seats = tableManager.getTableState(tableId)?.seats || [];
     antiCheat.onJoinTable(socket.id, tableId, seats.map(s=>({socketId:s.socketId||s.seat})));
@@ -308,10 +309,11 @@ io.on('connection', async (socket) => {
         for (const seat of finalState.seats) {
           const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
           if (skt?.userId) {
-            const delta = seat.stack - (skt.chips || 0);
+            const trueNow = (skt.offTableChips ?? 0) + seat.stack;
+            const delta = trueNow - (skt.chips || 0);
             if (Math.abs(delta) > 0.001) {
               await updateChips(skt.userId, delta, 0);
-              skt.chips = seat.stack;
+              skt.chips = trueNow;
             }
             const isWinner = seat.name === hr?.winner;
             updateStats(skt.userId, {
@@ -346,6 +348,28 @@ io.on('connection', async (socket) => {
     socket.leave(tableId);
     antiCheat.onLeaveTable(socket.id);
     io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+    io.emit('tableListUpdated');  // refresh lobby player counts for all clients
+
+    // If leaving mid-hand awarded the pot to someone, emit handResult and credit winner
+    if (leaveResult?.handResult) {
+      const hr = leaveResult.handResult;
+      io.to(tableId).emit('handResult', hr);
+      const finalState = tableManager.getTableState(tableId);
+      if (finalState?.seats) {
+        for (const seat of finalState.seats) {
+          const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
+          if (skt?.userId) {
+            const trueNow = (skt.offTableChips ?? 0) + seat.stack;
+            const delta = trueNow - (skt.chips || 0);
+            if (Math.abs(delta) > 0.001) {
+              await updateChips(skt.userId, delta, 0);
+              skt.chips = trueNow;
+            }
+          }
+        }
+      }
+      setTimeout(() => tryStartNewHand(tableId), 3500);
+    }
 
     if (socket.userId) {
       // True balance = what was left off-table + what they're cashing out with
@@ -475,7 +499,7 @@ io.on('connection', async (socket) => {
   });
 
   // ── SNG game action (player fold/call/raise during an SNG) ─────
-  socket.on('sngAction', ({ sngId, action, amount }) => {
+  socket.on('sngAction', async ({ sngId, action, amount }) => {
     const tourn = tournamentEngine.get(sngId);
     if (!tourn || tourn.status !== 'running') {
       socket.emit('error', { message: 'Tournament not running' });
@@ -500,23 +524,41 @@ io.on('connection', async (socket) => {
       // Eliminate busted players (stack = 0 after hand)
       const postState = tableManager.getTableState(tableId);
       if (postState?.seats) {
-        postState.seats.forEach(seat => {
-          if (seat.stack <= 0) {
-            const elim = tournamentEngine.eliminatePlayer(sngId, seat.socketId);
-            if (elim) {
-              io.to(seat.socketId).emit('sngEliminated', {
-                place: elim.place,
-                prize: elim.prize,
-                remainingPlayers: elim.remaining,
-              });
-              tableManager.leaveTable(tableId, seat.socketId);
+        for (const seat of postState.seats.filter(s => s.stack <= 0)) {
+          const elim = tournamentEngine.eliminatePlayer(sngId, seat.socketId);
+          if (elim) {
+            // Credit prize to DB immediately (buy-in was debited at sngJoin)
+            if (elim.prize > 0) {
+              const elimSkt = io.sockets.sockets.get(seat.socketId);
+              if (elimSkt?.userId) {
+                await updateChips(elimSkt.userId, elim.prize, 0).catch(() => {});
+                if (elimSkt.chips != null) elimSkt.chips += elim.prize;
+                elimSkt.emit('chipsReturned', { balance: elimSkt.chips || 0 });
+              }
             }
+            io.to(seat.socketId).emit('sngEliminated', {
+              place: elim.place,
+              prize: elim.prize,
+              remainingPlayers: elim.remaining,
+            });
+            tableManager.leaveTable(tableId, seat.socketId);
           }
-        });
+        }
       }
 
       const updatedTourn = tournamentEngine.get(sngId);
       if (updatedTourn.status === 'finished') {
+        // Credit winner prize to DB
+        for (const r of updatedTourn.results || []) {
+          if ((r.prize || 0) > 0) {
+            const wSkt = [...io.sockets.sockets.values()].find(s => s.id === r.socketId);
+            if (wSkt?.userId) {
+              await updateChips(wSkt.userId, r.prize, 0).catch(() => {});
+              if (wSkt.chips != null) wSkt.chips += r.prize;
+              wSkt.emit('chipsReturned', { balance: wSkt.chips || 0 });
+            }
+          }
+        }
         io.to('tourn_' + sngId).emit('sngResult', { results: updatedTourn.results });
         tableManager.removeTable(tableId);
       } else {
@@ -661,8 +703,9 @@ io.on('connection', async (socket) => {
         for (const seat of finalState.seats) {
           const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
           if (skt?.userId) {
-            const delta = seat.stack - (skt.chips || 0);
-            if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = seat.stack; }
+            const trueNow = (skt.offTableChips ?? 0) + seat.stack;
+            const delta = trueNow - (skt.chips || 0);
+            if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = trueNow; }
             const isWinner = seat.name === hr?.winner;
             updateStats(skt.userId, { handPlayed: 1, won: isWinner ? 1 : 0,
               amountWon: isWinner ? (hr?.amount || 0) : 0, amountLost: 0,
@@ -738,8 +781,9 @@ io.on('connection', async (socket) => {
           for (const seat of finalState.seats) {
             const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
             if (skt?.userId) {
-              const delta = seat.stack - (skt.chips || 0);
-              if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = seat.stack; }
+              const trueNow = (skt.offTableChips ?? 0) + seat.stack;
+              const delta = trueNow - (skt.chips || 0);
+              if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = trueNow; }
               const isWinner = seat.name === hr?.winner;
               updateStats(skt.userId, { handPlayed: 1, won: isWinner ? 1 : 0,
                 amountWon: isWinner ? (hr?.amount || 0) : 0, amountLost: 0,
