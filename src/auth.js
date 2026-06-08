@@ -264,12 +264,21 @@ async function setOTP(userId, code) {
   }
 }
 
+// Timing-safe OTP comparison — prevents timing-based brute-force analysis
+function otpMatch(stored, provided) {
+  if (!stored || !provided) return false;
+  const a = Buffer.from(String(stored));
+  const b = Buffer.from(String(provided));
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
 async function verifyOTP(userId, code) {
   if (useDB) {
     const row = await db.queryOne('SELECT otp_code, otp_expires, email_verified FROM users WHERE id=$1', [userId]);
     if (!row) return { ok: false, error: 'Account not found.' };
     if (row.email_verified) return { ok: true, alreadyVerified: true };
-    if (row.otp_code !== code) return { ok: false, error: 'Incorrect code.' };
+    if (!otpMatch(row.otp_code, code)) return { ok: false, error: 'Incorrect code.' };
     if (Date.now() > parseInt(row.otp_expires)) return { ok: false, error: 'Code expired. Request a new one.' };
     await db.query('UPDATE users SET email_verified=true, otp_code=NULL, otp_expires=NULL WHERE id=$1', [userId]);
     return { ok: true };
@@ -278,7 +287,7 @@ async function verifyOTP(userId, code) {
     const u = users[userId];
     if (!u) return { ok: false, error: 'Account not found.' };
     if (u.emailVerified) return { ok: true, alreadyVerified: true };
-    if (u.otp_code !== code) return { ok: false, error: 'Incorrect code.' };
+    if (!otpMatch(u.otp_code, code)) return { ok: false, error: 'Incorrect code.' };
     if (Date.now() > u.otp_expires) return { ok: false, error: 'Code expired. Request a new one.' };
     u.emailVerified = true; u.otp_code = null; u.otp_expires = null;
     saveUsers(users);
