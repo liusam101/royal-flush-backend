@@ -316,7 +316,9 @@ const tableManager = {
       const minTotal  = maxBet + minRaise;
       const reqTotal  = Math.max(minTotal, Number(amount) || minTotal);
       const total     = Math.min(reqTotal, actor.stack + (actor.bet||0));
-      t.lastRaiseSize = total - maxBet;
+      // Only update lastRaiseSize for full raises — a short all-in doesn't reopen betting
+      const newRaiseSize = total - maxBet;
+      if (newRaiseSize >= minRaise) t.lastRaiseSize = newRaiseSize;
       const extra     = total - (actor.bet||0);
       actor.stack    -= Math.max(0, extra);
       actor.totalBet  = (actor.totalBet||0) + Math.max(0, extra);
