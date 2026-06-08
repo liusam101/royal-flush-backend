@@ -290,6 +290,7 @@ io.on('connection', async (socket) => {
 
     if (result.handOver) {
       const hr = result.handResult;
+      const isShowdown = hr?.reason === 'showdown';
       if (hr?.winner) {
         const winnerSeat = preState?.seats?.find(s=>s.name===hr.winner);
         const loserSeats = preState?.seats?.filter(s=>s.name!==hr.winner&&!s.folded);
@@ -298,6 +299,7 @@ io.on('connection', async (socket) => {
             winner: hr.winner, loser: loser.name,
             winnerSocket: winnerSeat?.socketId, loserSocket: loser.socketId,
             amount: hr.amount || 0,
+            isShowdown,
           });
         });
       }
@@ -305,7 +307,6 @@ io.on('connection', async (socket) => {
       handHistory.endHand(tableId, hr);
       const finalState = tableManager.getTableState(tableId);
       if (finalState?.seats) {
-        const isShowdown = hr?.reason === 'showdown';
         for (const seat of finalState.seats) {
           const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
           if (skt?.userId) {
@@ -316,11 +317,13 @@ io.on('connection', async (socket) => {
               skt.chips = trueNow;
             }
             const isWinner = seat.name === hr?.winner;
+            // Record losses for RG loss-limit tracking
+            if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta));
             updateStats(skt.userId, {
               handPlayed: 1,
               won: isWinner ? 1 : 0,
               amountWon: isWinner ? (hr?.amount || 0) : 0,
-              amountLost: 0,
+              amountLost: !isWinner && delta < 0 ? Math.abs(delta) : 0,
               showdownWin: isShowdown && isWinner ? 1 : 0,
               showdownPlayed: isShowdown ? 1 : 0,
             }).catch(() => {});
@@ -432,8 +435,19 @@ io.on('connection', async (socket) => {
     // Debit buy-in from real balance so SNG chips aren't free
     const actualBuyIn = tourn.buyIn || buyIn || 0;
     if (socket.userId && actualBuyIn > 0) {
-      await updateChips(socket.userId, -actualBuyIn, 0).catch(() => {});
-      socket.chips = Math.max(0, (socket.chips || 0) - actualBuyIn);
+      if ((socket.chips || 0) < actualBuyIn) {
+        tournamentEngine.unregister(tourn.id, socket.id);
+        socket.emit('error', { message: 'Insufficient balance for this buy-in.' });
+        return;
+      }
+      try {
+        await updateChips(socket.userId, -actualBuyIn, 0);
+        socket.chips = Math.max(0, (socket.chips || 0) - actualBuyIn);
+      } catch(e) {
+        tournamentEngine.unregister(tourn.id, socket.id);
+        socket.emit('error', { message: 'Could not process buy-in. Please try again.' });
+        return;
+      }
     }
 
     socket.join('tourn_' + tourn.id);
