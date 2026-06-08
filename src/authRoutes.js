@@ -12,7 +12,10 @@ function generateOTP() {
 }
 const { antiCheat } = require('./antiCheat');
 
-const _otpCooldown = new Map(); // userId → timestamp of last send
+const _otpCooldown  = new Map(); // userId → timestamp of last send
+const _otpAttempts  = new Map(); // userId → { count, resetAt } — brute-force guard
+const OTP_MAX_TRIES = 10;
+const OTP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes (matches OTP TTL)
 
 // ── Register ──────────────────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
@@ -76,8 +79,20 @@ router.post('/verify-otp', authMiddleware, async (req, res) => {
   try {
     const { code } = req.body;
     if (!code || !/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter a 6-digit code.' });
+
+    // Brute-force guard: max 10 attempts per OTP window
+    const now = Date.now();
+    let att = _otpAttempts.get(req.user.id);
+    if (!att || now > att.resetAt) att = { count: 0, resetAt: now + OTP_WINDOW_MS };
+    if (att.count >= OTP_MAX_TRIES) {
+      return res.status(429).json({ error: 'Too many incorrect attempts. Request a new code.' });
+    }
+    att.count++;
+    _otpAttempts.set(req.user.id, att);
+
     const result = await verifyOTP(req.user.id, code);
     if (!result.ok) return res.status(400).json({ error: result.error });
+    _otpAttempts.delete(req.user.id); // clear on success
     res.json({ ok: true, message: 'Email verified!' });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
