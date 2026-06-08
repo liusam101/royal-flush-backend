@@ -39,7 +39,7 @@ const PACKAGES = {
 // Returns true if chips were credited, false if already processed.
 async function creditSession(sessionId, userId, pkg) {
   try {
-    // INSERT will fail if session_id already exists (PRIMARY KEY constraint)
+    // INSERT fails with 23505 if session already processed (PRIMARY KEY constraint)
     await db.query(
       `INSERT INTO payments (session_id, user_id, amount_usd, gold_chips, royal_chips, created_at)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -49,7 +49,13 @@ async function creditSession(sessionId, userId, pkg) {
     if (e.code === '23505') return false; // duplicate — already credited
     throw e;
   }
-  await updateChips(userId, pkg.royal, pkg.gold);
+  try {
+    await updateChips(userId, pkg.royal, pkg.gold);
+  } catch(e) {
+    // Roll back the INSERT so Stripe can retry and re-process cleanly
+    await db.query('DELETE FROM payments WHERE session_id=$1', [sessionId]).catch(() => {});
+    throw e;
+  }
   console.log(`[Payment] ${userId} credited ${pkg.gold} gold + ${pkg.royal} royal (session ${sessionId})`);
   return true;
 }
