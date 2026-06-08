@@ -302,18 +302,17 @@ router.post('/daily-bonus/claim', authMiddleware, async (req, res) => {
 router.get('/leaderboard', async (req, res) => {
   try {
     const rows = await dbQuery(
-      `SELECT username, stats FROM users WHERE banned=false AND stats IS NOT NULL ORDER BY (stats->>'totalWon')::numeric - (stats->>'totalLost')::numeric DESC LIMIT 10`
+      `SELECT username, total_won, total_lost, hands_played
+       FROM users
+       WHERE banned=false AND hands_played > 0
+       ORDER BY (COALESCE(total_won,0) - COALESCE(total_lost,0)) DESC
+       LIMIT 10`
     );
-    const leaders = rows
-      .map(u => {
-        const s = typeof u.stats === 'string' ? JSON.parse(u.stats) : (u.stats || {});
-        return {
-          name:  u.username,
-          net:   (s.totalWon || 0) - (s.totalLost || 0),
-          hands: s.handsPlayed || 0,
-        };
-      })
-      .filter(u => u.hands > 0);
+    const leaders = rows.map(u => ({
+      name:  u.username,
+      net:   parseFloat(u.total_won || 0) - parseFloat(u.total_lost || 0),
+      hands: parseInt(u.hands_played || 0),
+    }));
     res.json({ ok: true, leaders });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
