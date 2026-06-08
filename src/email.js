@@ -59,9 +59,10 @@ async function makeToken(type, userId, email) {
   const now   = Date.now();
   try {
     if (db.getPool()) {
-      await db.query('DELETE FROM email_tokens WHERE user_id=$1 AND type=$2', [userId, type]);
       await db.query(
-        'INSERT INTO email_tokens (token,type,user_id,email,created_at,used) VALUES ($1,$2,$3,$4,$5,false)',
+        `INSERT INTO email_tokens (token,type,user_id,email,created_at,used)
+         VALUES ($1,$2,$3,$4,$5,false)
+         ON CONFLICT (user_id,type) DO UPDATE SET token=$1, email=$4, created_at=$5, used=false`,
         [token, type, userId, email, now]
       );
       return token;
