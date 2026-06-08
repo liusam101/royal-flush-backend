@@ -278,7 +278,7 @@ const DAILY_GOLD = 1250;
 router.get('/daily-bonus/status', authMiddleware, async (req, res) => {
   try {
     const row = await queryOne('SELECT last_bonus_day FROM users WHERE id = $1', [req.user.id]);
-    const today = new Date().toDateString();
+    const today = new Date().toISOString().slice(0, 10); // UTC date — consistent across timezones
     const claimed = row?.last_bonus_day === today;
     res.json({ ok: true, claimed, reward: DAILY_GOLD });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
@@ -286,7 +286,7 @@ router.get('/daily-bonus/status', authMiddleware, async (req, res) => {
 
 router.post('/daily-bonus/claim', authMiddleware, async (req, res) => {
   try {
-    const today = new Date().toDateString();
+    const today = new Date().toISOString().slice(0, 10); // UTC date — consistent across timezones
     // Atomic update — prevents double-claim from race conditions
     const rows = await dbQuery(
       'UPDATE users SET last_bonus_day=$1 WHERE id=$2 AND (last_bonus_day IS DISTINCT FROM $1) RETURNING id',
@@ -295,6 +295,35 @@ router.post('/daily-bonus/claim', authMiddleware, async (req, res) => {
     if (!rows.length) return res.status(400).json({ error: 'Already claimed today' });
     await updateChips(req.user.id, 0, DAILY_GOLD).catch(()=>{});
     res.json({ ok: true, reward: DAILY_GOLD });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// ── Public leaderboard (no auth required) ──────────────────────────────────
+router.get('/leaderboard', async (req, res) => {
+  try {
+    const rows = await dbQuery(
+      `SELECT username, stats FROM users WHERE banned=false AND stats IS NOT NULL ORDER BY (stats->>'totalWon')::numeric - (stats->>'totalLost')::numeric DESC LIMIT 10`
+    );
+    const leaders = rows
+      .map(u => {
+        const s = typeof u.stats === 'string' ? JSON.parse(u.stats) : (u.stats || {});
+        return {
+          name:  u.username,
+          net:   (s.totalWon || 0) - (s.totalLost || 0),
+          hands: s.handsPlayed || 0,
+        };
+      })
+      .filter(u => u.hands > 0);
+    res.json({ ok: true, leaders });
+  } catch(e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// ── RC daily claim (Barrel Chip — persists balance to DB) ─────────────────
+const RC_DAILY_CHIPS = 1; // $1 RC value
+router.post('/rc-claim', authMiddleware, async (req, res) => {
+  try {
+    await updateChips(req.user.id, RC_DAILY_CHIPS, 0);
+    res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
