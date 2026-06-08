@@ -308,7 +308,7 @@ io.on('connection', async (socket) => {
       const finalState = tableManager.getTableState(tableId);
       if (finalState?.seats) {
         for (const seat of finalState.seats) {
-          const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
+          const skt = io.sockets.sockets.get(seat.socketId); // O(1) Map lookup
           if (skt?.userId) {
             const trueNow = (skt.offTableChips ?? 0) + seat.stack;
             const delta = trueNow - (skt.chips || 0);
@@ -360,7 +360,7 @@ io.on('connection', async (socket) => {
       const finalState = tableManager.getTableState(tableId);
       if (finalState?.seats) {
         for (const seat of finalState.seats) {
-          const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
+          const skt = io.sockets.sockets.get(seat.socketId); // O(1) Map lookup
           if (skt?.userId) {
             const trueNow = (skt.offTableChips ?? 0) + seat.stack;
             const delta = trueNow - (skt.chips || 0);
@@ -368,6 +368,13 @@ io.on('connection', async (socket) => {
               await updateChips(skt.userId, delta, 0);
               skt.chips = trueNow;
             }
+            // Credit the winner's stats (loser left, so no loser stats here)
+            const isWinner = seat.name === hr?.winner;
+            updateStats(skt.userId, {
+              handPlayed: 1, won: isWinner ? 1 : 0,
+              amountWon: isWinner ? (hr?.amount || 0) : 0, amountLost: 0,
+              showdownWin: 0, showdownPlayed: 0,
+            }).catch(() => {});
           }
         }
       }
@@ -381,6 +388,8 @@ io.on('connection', async (socket) => {
       if (Math.abs(delta) > 0.001) {
         await updateChips(socket.userId, delta, 0);
       }
+      // Track losses for RG limits — leaving mid-hand forfeits pot
+      if (delta < 0) rg.recordLoss(socket.userId, Math.abs(delta));
       socket.offTableChips = null;
       socket.chips = trueBalance;
       socket.emit('chipsReturned', { balance: trueBalance });
@@ -565,7 +574,7 @@ io.on('connection', async (socket) => {
         // Credit winner prize to DB
         for (const r of updatedTourn.results || []) {
           if ((r.prize || 0) > 0) {
-            const wSkt = [...io.sockets.sockets.values()].find(s => s.id === r.socketId);
+            const wSkt = io.sockets.sockets.get(r.socketId); // O(1) Map lookup
             if (wSkt?.userId) {
               await updateChips(wSkt.userId, r.prize, 0).catch(() => {});
               if (wSkt.chips != null) wSkt.chips += r.prize;
@@ -715,14 +724,16 @@ io.on('connection', async (socket) => {
       const finalState = tableManager.getTableState(tableId);
       if (finalState?.seats) {
         for (const seat of finalState.seats) {
-          const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
+          const skt = io.sockets.sockets.get(seat.socketId); // O(1) Map lookup
           if (skt?.userId) {
             const trueNow = (skt.offTableChips ?? 0) + seat.stack;
             const delta = trueNow - (skt.chips || 0);
             if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = trueNow; }
             const isWinner = seat.name === hr?.winner;
+            if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta));
             updateStats(skt.userId, { handPlayed: 1, won: isWinner ? 1 : 0,
-              amountWon: isWinner ? (hr?.amount || 0) : 0, amountLost: 0,
+              amountWon: isWinner ? (hr?.amount || 0) : 0,
+              amountLost: !isWinner && delta < 0 ? Math.abs(delta) : 0,
               showdownWin: 0, showdownPlayed: 0 }).catch(() => {});
           }
         }
@@ -793,14 +804,16 @@ io.on('connection', async (socket) => {
         const finalState = tableManager.getTableState(tid);
         if (finalState?.seats) {
           for (const seat of finalState.seats) {
-            const skt = [...io.sockets.sockets.values()].find(s => s.id === seat.socketId);
+            const skt = io.sockets.sockets.get(seat.socketId); // O(1) Map lookup
             if (skt?.userId) {
               const trueNow = (skt.offTableChips ?? 0) + seat.stack;
               const delta = trueNow - (skt.chips || 0);
               if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = trueNow; }
               const isWinner = seat.name === hr?.winner;
+              if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta));
               updateStats(skt.userId, { handPlayed: 1, won: isWinner ? 1 : 0,
-                amountWon: isWinner ? (hr?.amount || 0) : 0, amountLost: 0,
+                amountWon: isWinner ? (hr?.amount || 0) : 0,
+                amountLost: !isWinner && delta < 0 ? Math.abs(delta) : 0,
                 showdownWin: 0, showdownPlayed: 0 }).catch(() => {});
             }
           }
