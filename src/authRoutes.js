@@ -230,11 +230,18 @@ router.get('/achievements', authMiddleware, (req, res) => {
 router.get('/friends', authMiddleware, async (req, res) => {
   try {
     const friendIds = social.getFriends(req.user.id);
-    const allUsers  = await getAllUsers();
-    const friends   = friendIds.map(id => {
-      const u = allUsers.find(u => u.id === id);
-      return u ? { id: u.id, username: u.username, stats: u.stats } : null;
-    }).filter(Boolean);
+    if (!friendIds.length) return res.json({ ok: true, friends: [] });
+    // Targeted query — only fetch the specific friend users, not all users
+    const rows = await dbQuery(
+      `SELECT id, username, hands_played, total_won, total_lost, hands_won FROM users
+       WHERE id = ANY($1) AND banned=false`,
+      [friendIds]
+    );
+    const friends = rows.map(u => ({
+      id: u.id, username: u.username,
+      stats: { handsPlayed: parseInt(u.hands_played||0), handsWon: parseInt(u.hands_won||0),
+               totalWon: parseFloat(u.total_won||0), totalLost: parseFloat(u.total_lost||0) },
+    }));
     res.json({ ok: true, friends });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
@@ -243,8 +250,10 @@ router.post('/friends/add', authMiddleware, async (req, res) => {
   try {
     const { username } = req.body;
     if (!username) return res.status(400).json({ error: 'Username required' });
-    const allUsers = await getAllUsers();
-    const friend   = allUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
+    // Direct indexed lookup — no full table scan
+    const friend = await queryOne(
+      'SELECT id, username FROM users WHERE LOWER(username)=LOWER($1) AND banned=false', [username]
+    );
     if (!friend) return res.status(404).json({ error: 'Player not found' });
     if (friend.id === req.user.id) return res.status(400).json({ error: "Can't add yourself" });
     const result = social.addFriend(req.user.id, friend.id);
