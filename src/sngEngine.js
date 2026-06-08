@@ -130,7 +130,7 @@ function checkEliminations(sngId) {
   // Check each player's chip count
   for (const player of sng.players) {
     if (player.eliminated) continue;
-    const seat = state.seats.find(s => s.name === player.name);
+    const seat = state.seats.find(s => s.socketId === player.socketId);
     if (!seat || seat.stack === 0) {
       // Player is busted
       player.eliminated = true;
