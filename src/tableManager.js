@@ -409,36 +409,44 @@ const tableManager = {
     const allResults = [];
 
     if (sidePots.length <= 1) {
-      // Simple case — single pot
+      // Simple case — single pot (handles ties with equal split)
       const result = t.engine.showdown(active, t.board);
-      const winner = active.find(s => s.name === result.winner);
       // ── Rake: 2.5% of pot, capped at $3 (exempt: tournaments, pots < $1)
       let rake = 0;
       if (!t.isTournament && totalPot >= 1) {
         rake = Math.min(Math.round(totalPot * 0.025 * 100) / 100, 3.00);
         t._rakeCollected = (t._rakeCollected || 0) + rake;
       }
-      if (winner) winner.stack += (totalPot - rake);
+      const net = totalPot - rake;
+      const winSeats = (result.winners || [result.winner])
+        .map(n => active.find(s => s.name === n)).filter(Boolean);
+      const share = Math.floor(net / winSeats.length * 100) / 100;
+      winSeats.forEach(w => w.stack += share);
+      // Rounding remainder (pennies) goes to the first winner
+      const remainder = Math.round((net - share * winSeats.length) * 100) / 100;
+      if (remainder > 0 && winSeats[0]) winSeats[0].stack += remainder;
       const showCards = active.map(s => ({ name: s.name, cards: s.cards }));
-      const handResult = { winner: result.winner, hand: result.hand, amount: totalPot - rake, rake, board: t.board, showCards };
+      const handResult = { winner: result.winner, winners: result.winners, hand: result.hand, amount: net, rake, board: t.board, showCards };
       this._resetHand(tableId);
       return handResult;
     }
 
-    // Multiple side pots
+    // Multiple side pots (each pot split among tied winners at that level)
     let lastWinner = null, lastHand = null, lastAmount = 0;
     for (const sp of sidePots) {
       const eligible = sp.eligible.map(i => t.seats[i]).filter(s => !s.folded && s.cards && s.cards.length >= 2);
       if (!eligible.length) continue;
       const result = t.engine.showdown(eligible, t.board);
-      const winner = eligible.find(s => s.name === result.winner);
-      if (winner) {
-        winner.stack += sp.amount;
-        lastWinner = result.winner;
-        lastHand = result.hand;
-        lastAmount += sp.amount;
-      }
-      allResults.push({ winner: result.winner, hand: result.hand, amount: sp.amount });
+      const winSeats = (result.winners || [result.winner])
+        .map(n => eligible.find(s => s.name === n)).filter(Boolean);
+      const share = Math.floor(sp.amount / winSeats.length * 100) / 100;
+      winSeats.forEach(w => w.stack += share);
+      const remainder = Math.round((sp.amount - share * winSeats.length) * 100) / 100;
+      if (remainder > 0 && winSeats[0]) winSeats[0].stack += remainder;
+      lastWinner = result.winner;
+      lastHand   = result.hand;
+      lastAmount += sp.amount;
+      allResults.push({ winner: result.winner, winners: result.winners, hand: result.hand, amount: sp.amount });
     }
 
     // Main result = whoever won the most (last side pot winner for display)
