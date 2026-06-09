@@ -49,48 +49,6 @@ function calcSidePots(seats) {
   return pots;
 }
 
-// ── Showdown with side pots ───────────────────────────────────────────────────
-function showdownWithSidePots(engine, seats, board) {
-  // Calculate side pots based on totalBet
-  const sidePots = calcSidePots(seats);
-  const results = [];
-  let totalAwarded = 0;
-
-  for (const pot of sidePots) {
-    const eligibleSeats = pot.eligible
-      .map(i => seats[i])
-      .filter(s => !s.folded && s.cards && s.cards.length >= 2);
-
-    if (!eligibleSeats.length) continue;
-
-    if (eligibleSeats.length === 1) {
-      eligibleSeats[0].stack += pot.amount;
-      results.push({ winner: eligibleSeats[0].name, amount: pot.amount, hand: 'uncontested' });
-      totalAwarded += pot.amount;
-      continue;
-    }
-
-    // Find best hand among eligible
-    let winner = null, winScore = null;
-    for (const seat of eligibleSeats) {
-      const seven = [...seat.cards, ...board];
-      if (seven.length < 5) continue;
-      const result = bestFive(seven);
-      if (!result) continue;
-      if (!winScore || compareScore(result.score, winScore) > 0) {
-        winner = seat; winScore = result.score;
-      }
-    }
-
-    if (winner) {
-      winner.stack += pot.amount;
-      results.push({ winner: winner.name, amount: pot.amount, hand: winScore?.name });
-      totalAwarded += pot.amount;
-    }
-  }
-
-  return { results, mainWinner: results[results.length - 1]?.winner || results[0]?.winner };
-}
 
 const tableManager = {
 
@@ -151,6 +109,7 @@ const tableManager = {
       board: t.board, sidePots: t.sidePots || [],
       seats: t.seats.map((s, i) => ({
         seat:     s.seat,
+        socketId: s.socketId,
         name:     s.name,
         stack:    s.stack,
         bet:      s.bet || 0,
