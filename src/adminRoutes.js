@@ -94,7 +94,7 @@ router.post('/players/kick', auth, (req, res) => {
   const { socketId, reason } = req.body;
   req.io?.to(socketId).emit('kicked', { reason: reason||'Removed by admin' });
   // Remove from all tables
-  const affected = tableManager.removePlayer(socketId);
+  const { affected } = tableManager.removePlayer(socketId);
   affected.forEach(tid=>req.io?.to(tid).emit('tableState', tableManager.getTableState(tid)));
   res.json({ ok:true, tablesAffected:affected });
 });
