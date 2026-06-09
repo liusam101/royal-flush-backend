@@ -136,13 +136,16 @@ const tournamentEngine = {
   },
 
   _startBlindTimer(t, io, onTableState) {
+    const { tableManager } = require('./tableManager');
     clearInterval(t.blindTimer);
     t.blindTimer = setInterval(() => {
       if (t.status !== 'running') return;
       t.blindLevel = Math.min(t.blindLevel + 1, STD_BLINDS.length - 1);
-      // Update all table engines with new blinds
-      Object.values(t.tables).forEach(tbl => {
-        tbl.engine = new GameEngine(STD_BLINDS[t.blindLevel][0], STD_BLINDS[t.blindLevel][1]);
+      const [sb, bb] = STD_BLINDS[t.blindLevel];
+      // Update both the internal engine and the actual tableManager tables
+      Object.keys(t.tables).forEach(tid => {
+        t.tables[tid].engine = new GameEngine(sb, bb);
+        tableManager.updateBlinds(tid, sb, bb);
       });
       if (io) {
         io.emit('tournBlindUp', {
