@@ -535,6 +535,9 @@ io.on('connection', async (socket) => {
     }
     const tableId = player.tableId;
 
+    const acOk = antiCheat.onAction(socket.id, action, tableId);
+    if (acOk === false) { socket.emit('error', { message: 'Action rate limited' }); return; }
+
     const result = tableManager.handleAction(tableId, socket.id, action, amount);
     if (!result.ok) { socket.emit('error', { message: result.error }); return; }
 
@@ -571,15 +574,14 @@ io.on('connection', async (socket) => {
 
       const updatedTourn = tournamentEngine.get(sngId);
       if (updatedTourn.status === 'finished') {
-        // Credit winner prize to DB
-        for (const r of updatedTourn.results || []) {
-          if ((r.prize || 0) > 0) {
-            const wSkt = io.sockets.sockets.get(r.socketId); // O(1) Map lookup
-            if (wSkt?.userId) {
-              await updateChips(wSkt.userId, r.prize, 0).catch(() => {});
-              if (wSkt.chips != null) wSkt.chips += r.prize;
-              wSkt.emit('chipsReturned', { balance: wSkt.chips || 0 });
-            }
+        // Credit winner prize to DB — results[] has no socketId; use registeredPlayers instead
+        const winnerPlayer = updatedTourn.registeredPlayers.find(p => p.place === 1);
+        if (winnerPlayer?.prize > 0) {
+          const wSkt = io.sockets.sockets.get(winnerPlayer.socketId);
+          if (wSkt?.userId) {
+            await updateChips(wSkt.userId, winnerPlayer.prize, 0).catch(() => {});
+            if (wSkt.chips != null) wSkt.chips += winnerPlayer.prize;
+            wSkt.emit('chipsReturned', { balance: wSkt.chips || 0 });
           }
         }
         io.to('tourn_' + sngId).emit('sngResult', { results: updatedTourn.results });
