@@ -148,6 +148,9 @@ function _hookHandName(hole) {
 // Gives them 60s to reconnect before their seat is removed.
 const pendingRemovals = {};
 
+// Chat rate limit: max 1 message per 500ms per socket
+const _chatLastTs = new Map();
+
 // ── Socket events ─────────────────────────────────────────────────
 io.on('connection', async (socket) => {
   console.log(`[+] ${socket.id}`);
@@ -396,8 +399,16 @@ io.on('connection', async (socket) => {
     }
   });
   socket.on('chatMessage', ({ tableId, playerName, message }) => {
+    // Rate limit: 1 message per 500ms
+    const now = Date.now();
+    if (now - (_chatLastTs.get(socket.id) || 0) < 500) return;
+    _chatLastTs.set(socket.id, now);
+    // Validate sender is actually in the room
+    if (!socket.rooms.has(tableId)) return;
+    // Use authenticated username if available, fall back to provided name
+    const from = socket.username || playerName;
     antiCheat.onChat(socket.id, message);
-    io.to(tableId).emit('chatMessage', { from:playerName, message:message.slice(0,200), ts:Date.now() });
+    io.to(tableId).emit('chatMessage', { from, message: message.slice(0, 200), ts: now });
   });
 
   // ── Tournament ─────────────────────────────────────────────────
@@ -711,6 +722,7 @@ io.on('connection', async (socket) => {
 
   socket.on('disconnect', async () => {
     console.log(`[-] ${socket.id}`);
+    _chatLastTs.delete(socket.id);
     antiCheat.onLeaveTable(socket.id);
     antiCheat.onDisconnect(socket.id);
 
