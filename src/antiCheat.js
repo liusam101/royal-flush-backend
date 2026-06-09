@@ -4,9 +4,36 @@
 //          multi-accounting, ghosting, statistical anomalies
 // ══════════════════════════════════════════════════════════════════════════
 const EventEmitter = require('events');
+const fs   = require('fs');
+const path = require('path');
 
 const SEV = { LOW:1, MEDIUM:2, HIGH:3, CRITICAL:4 };
 const SEV_NAMES = {1:'LOW',2:'MEDIUM',3:'HIGH',4:'CRITICAL'};
+
+// ── Ban persistence ────────────────────────────────────────────────────────
+const DATA_DIR  = process.env.RAILWAY_ENVIRONMENT
+  ? path.join('/tmp', 'rfdata')
+  : path.join(__dirname, '../../data');
+const BANS_FILE = path.join(DATA_DIR, 'bans.json');
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch(_) {}
+
+function _loadBans() {
+  try {
+    const d = JSON.parse(fs.readFileSync(BANS_FILE, 'utf8'));
+    return { ips: new Set(d.ips||[]), names: new Set(d.names||[]), fps: new Set(d.fps||[]) };
+  } catch(_) {
+    return { ips: new Set(), names: new Set(), fps: new Set() };
+  }
+}
+function _saveBans() {
+  try {
+    fs.writeFileSync(BANS_FILE, JSON.stringify({
+      ips:   [...bannedIPs],
+      names: [...bannedNames],
+      fps:   [...bannedFPs],
+    }, null, 2));
+  } catch(e) { console.error('[AntiCheat] saveBans failed:', e.message); }
+}
 
 // ── Storage ───────────────────────────────────────────────────────────────
 const sessions    = {};  // socketId → SessionData
@@ -15,9 +42,7 @@ const fpMap       = {};  // fingerprint → Set<socketId>
 const flagged     = {};  // socketId → Alert[]
 const collusionGraph = {}; // playerId → { wins: {vs:amount}, losses: {vs:amount} }
 
-const bannedIPs   = new Set();
-const bannedNames = new Set();
-const bannedFPs   = new Set();
+const { ips: bannedIPs, names: bannedNames, fps: bannedFPs } = _loadBans();
 
 // ── Session defaults ───────────────────────────────────────────────────────
 function getSession(socketId) {
@@ -491,11 +516,11 @@ antiCheat.onDisconnect  = (socketId) => {
 antiCheat.setPlayerStack = (socketId, stack) => { if(sessions[socketId]) sessions[socketId].currentStack=stack; };
 
 // Admin controls
-antiCheat.banIP     = ip   => bannedIPs.add(ip);
-antiCheat.banName   = name => bannedNames.add(name.toLowerCase());
-antiCheat.banFP     = fp   => bannedFPs.add(fp);
-antiCheat.unbanIP   = ip   => bannedIPs.delete(ip);
-antiCheat.unbanName = name => bannedNames.delete(name.toLowerCase());
+antiCheat.banIP     = ip   => { bannedIPs.add(ip);                    _saveBans(); };
+antiCheat.banName   = name => { bannedNames.add(name.toLowerCase());   _saveBans(); };
+antiCheat.banFP     = fp   => { bannedFPs.add(fp);                     _saveBans(); };
+antiCheat.unbanIP   = ip   => { bannedIPs.delete(ip);                  _saveBans(); };
+antiCheat.unbanName = name => { bannedNames.delete(name.toLowerCase()); _saveBans(); };
 
 antiCheat.getAlerts = ({minSeverity=1,unreviewed=false,socketId=null,type=null}={}) => {
   let all = Object.values(flagged).flat();
