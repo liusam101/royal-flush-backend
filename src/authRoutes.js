@@ -343,9 +343,15 @@ router.get('/leaderboard', async (req, res) => {
 
 // ── RC daily claim (Barrel Chip — persists balance to DB) ─────────────────
 const RC_DAILY_CHIPS = 1; // $1 RC value
+const _rcClaimedToday = new Map(); // userId → UTC date string (server-side daily guard)
+
 router.post('/rc-claim', authMiddleware, async (req, res) => {
+  const today = new Date().toISOString().slice(0, 10);
+  if (_rcClaimedToday.get(req.user.id) === today)
+    return res.status(429).json({ error: 'Already claimed today.' });
   try {
     await updateChips(req.user.id, RC_DAILY_CHIPS, 0);
+    _rcClaimedToday.set(req.user.id, today);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
