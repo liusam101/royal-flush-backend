@@ -117,6 +117,8 @@ async function initDB() {
         created_at BIGINT NOT NULL,
         used       BOOLEAN DEFAULT FALSE
       );
+      -- Required for ON CONFLICT (user_id, type) UPSERT in email.js
+      CREATE UNIQUE INDEX IF NOT EXISTS email_tokens_user_type_idx ON email_tokens (user_id, type);
     `);
     console.log('[DB] Tables ready');
     return true;
