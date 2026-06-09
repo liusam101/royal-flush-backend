@@ -144,13 +144,8 @@ router.post('/reset-password', async (req, res) => {
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// ── Stats update ──────────────────────────────────────────────────────────
-router.post('/stats', authMiddleware, async (req, res) => {
-  try {
-    await updateStats(req.user.id, req.body);
-    res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: 'Server error' }); }
-});
+// Stats are updated server-side only (after each hand in server.js).
+// A public endpoint would allow any user to forge their own leaderboard stats.
 
 // ── Admin ─────────────────────────────────────────────────────────────────
 router.get('/users', async (req, res) => {
@@ -343,15 +338,19 @@ router.get('/leaderboard', async (req, res) => {
 
 // ── RC daily claim (Barrel Chip — persists balance to DB) ─────────────────
 const RC_DAILY_CHIPS = 1; // $1 RC value
-const _rcClaimedToday = new Map(); // userId → UTC date string (server-side daily guard)
 
 router.post('/rc-claim', authMiddleware, async (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
-  if (_rcClaimedToday.get(req.user.id) === today)
-    return res.status(429).json({ error: 'Already claimed today.' });
   try {
+    // Atomic DB update — same pattern as daily-bonus/claim.
+    // Rejects if last_rc_day already equals today, preventing double-claims
+    // even across server restarts or multiple Railway instances.
+    const rows = await dbQuery(
+      'UPDATE users SET last_rc_day=$1 WHERE id=$2 AND (last_rc_day IS DISTINCT FROM $1) RETURNING id',
+      [today, req.user.id]
+    );
+    if (!rows.length) return res.status(429).json({ error: 'Already claimed today.' });
     await updateChips(req.user.id, RC_DAILY_CHIPS, 0);
-    _rcClaimedToday.set(req.user.id, today);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
