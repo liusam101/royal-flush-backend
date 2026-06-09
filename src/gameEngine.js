@@ -1,26 +1,10 @@
 // ── Deck ──────────────────────────────────────────────────────────────
-const crypto = require('crypto');
+// Use the shared RNG module — rejection-sampling Fisher-Yates with no modulo bias
+const { freshDeck } = require('./rng');
 const RANKS  = ['2','3','4','5','6','7','8','9','T','J','Q','K','A'];
-const SUITS  = ['♠','♥','♦','♣'];
 const RED    = new Set(['♥','♦']);
 
 function rankVal(r) { return RANKS.indexOf(r) + 2; }
-
-function makeDeck() {
-  const deck = [];
-  for (const s of SUITS)
-    for (const r of RANKS)
-      deck.push({ r, s, red: RED.has(s) });
-  return deck;
-}
-
-function shuffle(deck) {
-  for (let i = deck.length - 1; i > 0; i--) {
-    const j = crypto.randomBytes(4).readUInt32BE(0) % (i + 1);
-    [deck[i], deck[j]] = [deck[j], deck[i]];
-  }
-  return deck;
-}
 
 // ── Hand Scoring ─────────────────────────────────────────────────────
 function scoreHand(five) {
@@ -80,7 +64,7 @@ class GameEngine {
   }
 
   newDeck() {
-    this.deck = shuffle(makeDeck());
+    this.deck = freshDeck();
     this.idx  = 0;
   }
 
