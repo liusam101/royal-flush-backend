@@ -107,18 +107,25 @@ class GameEngine {
 
   showdown(seats, board) {
     const active = seats.filter(s => !s.folded);
-    let winner = null, winScore = null;
+    let winners = [], winScore = null;
 
     for (const seat of active) {
       const seven  = [...seat.cards, ...board];
       const result = bestFive(seven);
-      if (!winScore || compareScore(result.score, winScore) > 0) {
-        winner   = seat;
+      const cmp = winScore ? compareScore(result.score, winScore) : 1;
+      if (cmp > 0) {
+        winners  = [seat];
         winScore = result.score;
+      } else if (cmp === 0) {
+        winners.push(seat);
       }
     }
 
-    return { winner: winner?.name, hand: winScore?.name };
+    return {
+      winner:  winners[0]?.name,
+      winners: winners.map(s => s.name),
+      hand:    winScore?.name,
+    };
   }
 }
 
