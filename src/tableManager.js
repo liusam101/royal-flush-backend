@@ -156,17 +156,18 @@ const tableManager = {
     if (!t) return;
     // No waiting list — new tables spawn automatically when full
 
-    // If hand is in progress and there's a pot, award it to the remaining active player.
+    // If hand is in progress and only one non-folded player remains after this leave,
+    // award the pot immediately. If 2+ remain, hand continues normally.
     const inProgress = t.phase !== 'waiting' && t.phase !== 'starting';
     let handResult = null;
     if (inProgress && t.pot > 0) {
       const remaining = t.seats.filter(s => s.socketId !== socketId && !s.folded);
-      if (remaining.length >= 1) {
+      if (remaining.length === 1) {
         handResult = { winner: remaining[0].name, amount: t.pot, reason: 'opponent left' };
         remaining[0].stack += t.pot;
+        t.pot = 0;
+        this._resetHand(tableId);
       }
-      t.pot = 0;
-      this._resetHand(tableId);
     }
 
     // Clear any auto-fold timers for the leaving player
