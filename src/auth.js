@@ -77,6 +77,10 @@ function makeToken(id, username) {
 function validate({ username, email, password }) {
   if (!username || username.length < 3)
     return 'Username must be at least 3 characters.';
+  if (username.length > 20)
+    return 'Username must be 20 characters or fewer.';
+  if (!/^[a-zA-Z0-9_\-.]+$/.test(username))
+    return 'Username may only contain letters, numbers, underscores, hyphens, and periods.';
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
     return 'Please enter a valid email address.';
   if (!password || password.length < 6)
