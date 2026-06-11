@@ -842,7 +842,10 @@ io.on('connection', async (socket) => {
 
 // Session name cache for interaction sig alerts
 const sessions = {};
-io.on('connection', s => { s.on('joinTable', ({playerName}) => { sessions[s.id] = {name:playerName}; }); });
+io.on('connection', s => {
+  s.on('joinTable', ({playerName}) => { sessions[s.id] = {name:playerName}; });
+  s.on('disconnect', () => { delete sessions[s.id]; });
+});
 
 // Stream anti-cheat alerts to admin room in real time
 antiCheat.on('alert', (alert) => {
