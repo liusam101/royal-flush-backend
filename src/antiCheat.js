@@ -511,6 +511,7 @@ antiCheat.onDisconnect  = (socketId) => {
   if (sess?.ip && ipMap[sess.ip]) { ipMap[sess.ip].delete(socketId); if(!ipMap[sess.ip].size) delete ipMap[sess.ip]; }
   if (sess?.fingerprint && fpMap[sess.fingerprint]) { fpMap[sess.fingerprint].delete(socketId); }
   delete actionBuckets[socketId];
+  delete flagged[socketId];
   delete sessions[socketId];
 };
 antiCheat.setPlayerStack = (socketId, stack) => { if(sessions[socketId]) sessions[socketId].currentStack=stack; };
