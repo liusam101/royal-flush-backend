@@ -71,7 +71,7 @@ router.get('/api/stats/lifetime', async (req, res) => {
 
   } catch (e) {
     console.error('[stats/lifetime]', e.message);
-    res.status(500).json({ error: 'stats_failed', message: e.message });
+    res.status(500).json({ error: 'stats_failed' });
   }
 });
 
