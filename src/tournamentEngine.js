@@ -5,6 +5,17 @@ const { GameEngine } = require('./gameEngine');
 
 const tournaments = {};
 let tIdCounter = 1;
+const TOURN_TTL_MS = 24 * 60 * 60 * 1000;
+setInterval(() => {
+  const cutoff = Date.now() - TOURN_TTL_MS;
+  Object.keys(tournaments).forEach(id => {
+    const t = tournaments[id];
+    if ((t.status === 'finished' || t.status === 'cancelled') && t.createdAt < cutoff) {
+      clearInterval(t.blindTimer);
+      delete tournaments[id];
+    }
+  });
+}, 60 * 60 * 1000);
 
 // SNG prize structures (small fields — fixed payouts)
 const SNG_PRIZE_PCTS = {
