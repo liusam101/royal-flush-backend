@@ -430,6 +430,7 @@ io.on('connection', async (socket) => {
 
   // ── Sit & Go ────────────────────────────────────────────────────
   socket.on('sngJoin', async ({ sngId, playerName, buyIn, max, rake, startingStack, name }) => {
+    const safeName = name ? String(name).replace(/[^a-zA-Z0-9 _.,'-]/g, '').trim().slice(0, 50) || sngId : sngId;
     let tourn = tournamentEngine.getAll().find(t =>
       t.status === 'registering' &&
       t.sngId === sngId &&
@@ -437,7 +438,7 @@ io.on('connection', async (socket) => {
     );
     if (!tourn) {
       tourn = tournamentEngine.createTournament({
-        name: name || sngId,
+        name: safeName,
         buyIn: buyIn || 0.5,
         startingStack: startingStack || 1000,
         blindMins: 10,
