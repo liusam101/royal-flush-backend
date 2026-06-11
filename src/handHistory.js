@@ -115,6 +115,7 @@ function _saveIndex() {
 
 // ── Query API ──────────────────────────────────────────────────────────────
 function getHand(handId) {
+  if (!/^H\d{8}-\d+$/.test(handId)) return null;
   // Check memory first
   const mem = _memCache.find(h => h.handId === handId);
   if (mem) return mem;
