@@ -855,6 +855,9 @@ antiCheat.on('alert', (alert) => {
 const { initAuth } = require('./auth');
 
 const PORT = process.env.PORT || 3001;
+if (!process.env.ADMIN_SECRET) {
+  console.warn('[SECURITY] ADMIN_SECRET env var not set — using insecure default. Set it in Railway variables.');
+}
 initAuth().then(async () => {
   await _loadAssetsFromDB();
   server.listen(PORT, () => console.log(`Royal Flush backend :${PORT}`));
