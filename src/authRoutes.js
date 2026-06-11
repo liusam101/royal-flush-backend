@@ -17,6 +17,10 @@ const _otpAttempts  = new Map(); // userId → { count, resetAt } — brute-forc
 const OTP_MAX_TRIES = 10;
 const OTP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes (matches OTP TTL)
 
+const _loginAttempts = new Map(); // ip → { count, resetAt } — brute-force guard
+const LOGIN_MAX_TRIES = 10;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
 // ── Register ──────────────────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
   try {
@@ -40,8 +44,20 @@ router.post('/register', async (req, res) => {
 // ── Login ─────────────────────────────────────────────────────────────────
 router.post('/login', async (req, res) => {
   try {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+    const now = Date.now();
+    let att = _loginAttempts.get(ip);
+    if (!att || now > att.resetAt) att = { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+    if (att.count >= LOGIN_MAX_TRIES)
+      return res.status(429).json({ error: 'Too many login attempts. Please try again in 15 minutes.' });
+
     const result = await login({ email: req.body.email, password: req.body.password });
-    if (!result.ok) return res.status(401).json({ error: result.error });
+    if (!result.ok) {
+      att.count++;
+      _loginAttempts.set(ip, att);
+      return res.status(401).json({ error: result.error });
+    }
+    _loginAttempts.delete(ip); // clear on success
     res.json({ ok: true, token: result.token, user: result.user });
   } catch(e) { console.error('/login:', e); res.status(500).json({ error: 'Server error' }); }
 });
