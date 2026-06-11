@@ -193,6 +193,9 @@ function saveAvatar(userId, base64DataUrl) {
   if (!base64DataUrl || !base64DataUrl.startsWith('data:image/')) {
     return { ok: false, error: 'Invalid image format' };
   }
+  if (/^data:image\/svg/i.test(base64DataUrl)) {
+    return { ok: false, error: 'SVG images are not allowed' };
+  }
   if (base64DataUrl.length > MAX_AVATAR_SIZE) {
     return { ok: false, error: 'Image too large (max ~40KB)' };
   }
