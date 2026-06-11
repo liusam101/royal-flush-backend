@@ -158,7 +158,8 @@ function setLimits(userId, newLimits) {
   const limitFields = ['depositDaily','depositWeekly','depositMonthly','lossDaily','sessionMins'];
   for (const field of limitFields) {
     if (newLimits[field] === undefined) continue;
-    const newVal = newLimits[field] === null ? null : parseFloat(newLimits[field]);
+    const parsed = newLimits[field] === null ? null : parseFloat(newLimits[field]);
+    const newVal = (parsed === null || (Number.isFinite(parsed) && parsed > 0)) ? parsed : null;
     const oldVal = rg[field];
     // Decreasing limit: apply immediately
     // Increasing limit: apply after 24h (store as pending)
@@ -199,18 +200,20 @@ function applyPendingLimits(userId) {
 
 // ── Self-exclusion ────────────────────────────────────────────────────────
 function selfExclude(userId, days) {
-  // days = null for permanent, number for temporary
+  // days = null for permanent, positive integer for temporary
+  const safeDays = (Number.isFinite(days) && days > 0) ? Math.floor(days) : null;
   const rg = getUserRG(userId);
   rg.selfExcluded   = true;
-  rg.selfExcludeUntil = days ? Date.now() + (days * 86400000) : null;
+  rg.selfExcludeUntil = safeDays ? Date.now() + (safeDays * 86400000) : null;
   saveUserRG(userId, rg);
-  return { ok: true, permanent: !days, until: rg.selfExcludeUntil };
+  return { ok: true, permanent: !safeDays, until: rg.selfExcludeUntil };
 }
 
 // ── Cooling-off period ────────────────────────────────────────────────────
 function setCooloff(userId, hours) {
+  const safeHours = (Number.isFinite(hours) && hours > 0) ? Math.min(hours, 168) : 24;
   const rg = getUserRG(userId);
-  rg.cooloffUntil = Date.now() + (hours * 3600000);
+  rg.cooloffUntil = Date.now() + (safeHours * 3600000);
   saveUserRG(userId, rg);
   return { ok: true, until: rg.cooloffUntil };
 }
