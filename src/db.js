@@ -120,6 +120,23 @@ async function initDB() {
       );
       -- Required for ON CONFLICT (user_id, type) UPSERT in email.js
       CREATE UNIQUE INDEX IF NOT EXISTS email_tokens_user_type_idx ON email_tokens (user_id, type);
+
+      CREATE TABLE IF NOT EXISTS rg_limits (
+        user_id            TEXT PRIMARY KEY,
+        deposit_daily      NUMERIC,
+        deposit_weekly     NUMERIC,
+        deposit_monthly    NUMERIC,
+        loss_daily         NUMERIC,
+        session_mins       NUMERIC,
+        self_excluded      BOOLEAN NOT NULL DEFAULT false,
+        self_exclude_until BIGINT,
+        cooloff_until      BIGINT,
+        reality_check_mins INTEGER NOT NULL DEFAULT 60,
+        pending_limits     JSONB NOT NULL DEFAULT 'null',
+        deposits           JSONB NOT NULL DEFAULT '[]',
+        sessions           JSONB NOT NULL DEFAULT '[]',
+        losses             JSONB NOT NULL DEFAULT '[]'
+      );
     `);
     console.log('[DB] Tables ready');
     return true;
