@@ -249,7 +249,7 @@ router.get('/friends', authMiddleware, async (req, res) => {
       [friendIds]
     );
     const friends = rows.map(u => ({
-      id: u.id, username: u.username,
+      id: u.id, username: u.username, name: u.username, col: '#3A2A5A', online: false, table: null,
       stats: { handsPlayed: parseInt(u.hands_played||0), handsWon: parseInt(u.hands_won||0),
                totalWon: parseFloat(u.total_won||0), totalLost: parseFloat(u.total_lost||0) },
     }));
