@@ -361,6 +361,7 @@ io.on('connection', async (socket) => {
     if (leaveResult?.handResult) {
       const hr = leaveResult.handResult;
       io.to(tableId).emit('handResult', hr);
+      handHistory.endHand(tableId, hr);
       const finalState = tableManager.getTableState(tableId);
       if (finalState?.seats) {
         for (const seat of finalState.seats) {
