@@ -853,13 +853,34 @@ io.on('connection', s => {
   s.on('disconnect', () => { delete sessions[s.id]; });
 });
 
-// Enforce session time limits — check all authenticated, at-table sockets every 60 seconds
+// Track last reality-check per user (userId → timestamp)
+const _lastRealityCheck = {};
+
+// Enforce session time limits and fire reality checks every 60 seconds
 setInterval(async () => {
   for (const skt of io.sockets.sockets.values()) {
     if (!skt.userId || skt.offTableChips == null) continue; // only players seated at a table
     try {
+      // Session time limit
       const result = await rg.checkSessionLimitAsync(skt.userId);
-      if (!result.ok) skt.emit('sessionLimitReached', { message: result.error, elapsed: result.elapsed });
+      if (!result.ok) {
+        skt.emit('sessionLimitReached', { message: result.error, elapsed: result.elapsed });
+        continue; // already kicked — skip reality check
+      }
+      // Reality check — emit if elapsed minutes since last check ≥ realityCheckMins
+      if (result.elapsed != null && result.limit != null) {
+        const rg2 = await rg.getUserRG(skt.userId);
+        const rcMins = rg2.realityCheckMins || 60;
+        const lastRC = _lastRealityCheck[skt.userId] || 0;
+        const msSinceLastRC = Date.now() - lastRC;
+        if (msSinceLastRC >= rcMins * 60000) {
+          _lastRealityCheck[skt.userId] = Date.now();
+          skt.emit('realityCheck', {
+            elapsed: result.elapsed,
+            message: `You've been playing for ${result.elapsed} minute(s). Take a moment to review your session.`,
+          });
+        }
+      }
     } catch (_) {}
   }
 }, 60000);
