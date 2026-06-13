@@ -322,7 +322,7 @@ io.on('connection', async (socket) => {
             }
             const isWinner = seat.name === hr?.winner;
             // Record losses for RG loss-limit tracking
-            if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta));
+            if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta)).catch(()=>{});
             updateStats(skt.userId, {
               handPlayed: 1,
               won: isWinner ? 1 : 0,
@@ -393,7 +393,7 @@ io.on('connection', async (socket) => {
         await updateChips(socket.userId, delta, 0);
       }
       // Track losses for RG limits — leaving mid-hand forfeits pot
-      if (delta < 0) rg.recordLoss(socket.userId, Math.abs(delta));
+      if (delta < 0) rg.recordLoss(socket.userId, Math.abs(delta)).catch(()=>{});
       socket.offTableChips = null;
       socket.chips = trueBalance;
       socket.emit('chipsReturned', { balance: trueBalance });
@@ -746,7 +746,7 @@ io.on('connection', async (socket) => {
             const delta = trueNow - (skt.chips || 0);
             if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = trueNow; }
             const isWinner = seat.name === hr?.winner;
-            if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta));
+            if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta)).catch(()=>{});
             updateStats(skt.userId, { handPlayed: 1, won: isWinner ? 1 : 0,
               amountWon: isWinner ? (hr?.amount || 0) : 0,
               amountLost: !isWinner && delta < 0 ? Math.abs(delta) : 0,
@@ -826,7 +826,7 @@ io.on('connection', async (socket) => {
               const delta = trueNow - (skt.chips || 0);
               if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = trueNow; }
               const isWinner = seat.name === hr?.winner;
-              if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta));
+              if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta)).catch(()=>{});
               updateStats(skt.userId, { handPlayed: 1, won: isWinner ? 1 : 0,
                 amountWon: isWinner ? (hr?.amount || 0) : 0,
                 amountLost: !isWinner && delta < 0 ? Math.abs(delta) : 0,
