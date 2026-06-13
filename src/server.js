@@ -853,6 +853,17 @@ io.on('connection', s => {
   s.on('disconnect', () => { delete sessions[s.id]; });
 });
 
+// Enforce session time limits — check all authenticated, at-table sockets every 60 seconds
+setInterval(async () => {
+  for (const skt of io.sockets.sockets.values()) {
+    if (!skt.userId || skt.offTableChips == null) continue; // only players seated at a table
+    try {
+      const result = await rg.checkSessionLimitAsync(skt.userId);
+      if (!result.ok) skt.emit('sessionLimitReached', { message: result.error, elapsed: result.elapsed });
+    } catch (_) {}
+  }
+}, 60000);
+
 // Stream anti-cheat alerts to admin room in real time
 antiCheat.on('alert', (alert) => {
   io.to('admin').emit('acAlert', alert);
