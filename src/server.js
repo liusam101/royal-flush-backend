@@ -218,7 +218,7 @@ io.on('connection', async (socket) => {
     if (socket.userId) {
       const rgCheck = await rg.checkRGLimits(socket.userId, buyIn);
       if (!rgCheck.ok) {
-        socket.emit('error', { message: rgCheck.reason || 'Access restricted by responsible gambling limits.' });
+        socket.emit('error', { message: rgCheck.error || 'Access restricted by responsible gambling limits.' });
         return;
       }
     }
