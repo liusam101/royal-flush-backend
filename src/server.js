@@ -231,6 +231,7 @@ io.on('connection', async (socket) => {
       socket.offTableChips = Math.max(0, (socket.chips || 0) - buyIn);
     }
 
+    if (socket.userId && !result.alreadyJoined) rg.startSession(socket.userId, tableId);
     socket.join(tableId);
     console.log(`    ${playerName} → ${tableId} seat${result.seat}`);
     socket.emit('joinedTable', { tableId, seat: result.seat });
@@ -354,6 +355,7 @@ io.on('connection', async (socket) => {
 
     socket.leave(tableId);
     antiCheat.onLeaveTable(socket.id);
+    if (socket.userId) rg.endSession(socket.userId).catch(() => {});
     io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
     io.emit('tableListUpdated');  // refresh lobby player counts for all clients
 
@@ -781,6 +783,7 @@ io.on('connection', async (socket) => {
             const trueBalance = savedOffTable + stack;
             const delta = trueBalance - savedChips;
             if (Math.abs(delta) > 0.001) await updateChips(savedUserId, delta, 0).catch(() => {});
+            rg.endSession(savedUserId).catch(() => {});
             console.log(`    [DC] ${savedSocketId} timed out — seat removed, balance $${trueBalance.toFixed(2)}`);
           }
         }, 60000),
