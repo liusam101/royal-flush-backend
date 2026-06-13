@@ -268,16 +268,19 @@ async function setLimits(userId, newLimits) {
 // ── Apply pending limit increases ─────────────────────────────────────────
 async function applyPendingLimits(userId) {
   const rg  = await getUserRG(userId);
-  if (!rg.pendingLimits) return;
+  if (!rg.pendingLimits) return rg;
   const now = Date.now();
+  let changed = false;
   for (const [field, pending] of Object.entries(rg.pendingLimits)) {
     if (now >= pending.applyAt) {
       rg[field] = pending.value;
       delete rg.pendingLimits[field];
+      changed = true;
     }
   }
   if (Object.keys(rg.pendingLimits).length === 0) delete rg.pendingLimits;
-  await saveUserRG(userId, rg);
+  if (changed) await saveUserRG(userId, rg);
+  return rg;
 }
 
 // ── Self-exclusion ────────────────────────────────────────────────────────
@@ -301,8 +304,7 @@ async function setCooloff(userId, hours) {
 
 // ── Get user's RG status ──────────────────────────────────────────────────
 async function getRGStatus(userId) {
-  await applyPendingLimits(userId);
-  const rg   = await getUserRG(userId);
+  const rg   = await applyPendingLimits(userId);
   const now  = Date.now();
   const day  = 86400000, week = 604800000, month = 2592000000;
   return {
