@@ -182,7 +182,8 @@ io.on('connection', async (socket) => {
 
   // ── Cash game ──────────────────────────────────────────────────
   socket.on('joinTable', async (data) => {
-    const { tableId, playerName, buyIn } = data;
+    const { tableId, playerName: rawPlayerName, buyIn } = data;
+    const playerName = socket.username || rawPlayerName;
 
     // Network-blip reconnect: player has a pending seat at this table
     if (socket.userId && pendingRemovals[socket.userId]) {
@@ -413,7 +414,7 @@ io.on('connection', async (socket) => {
 
   // ── Tournament ─────────────────────────────────────────────────
   socket.on('tournRegister', ({ tournId, playerName }) => {
-    const result = tournamentEngine.register(tournId, socket.id, playerName);
+    const result = tournamentEngine.register(tournId, socket.id, socket.username || playerName);
     if (!result.ok) { socket.emit('error', { message: result.error }); return; }
     socket.join('tourn_' + tournId);
     socket.emit('tournRegistered', { tournId, ...result });
@@ -450,7 +451,7 @@ io.on('connection', async (socket) => {
       tourn.isSNG = true;
     }
 
-    const result = tournamentEngine.register(tourn.id, socket.id, playerName);
+    const result = tournamentEngine.register(tourn.id, socket.id, socket.username || playerName);
     if (!result.ok) { socket.emit('error', { message: result.error }); return; }
 
     // Debit buy-in from real balance so SNG chips aren't free
