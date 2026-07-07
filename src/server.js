@@ -14,6 +14,7 @@ const authRouter                        = require('./authRoutes');
 const paymentRouter                     = require('./paymentRoutes');
 const lifetimeStats                     = require('./lifetimeStats');
 const { verifyTokenAsync, updateChips, updateStats } = require('./auth');
+const { ADMIN_SECRET } = require('./config');
 const rg = require('./responsibleGambling');
 const { query: dbQuery }                       = require('./db');
 
@@ -63,9 +64,10 @@ const ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'http://localhost:3001',
 ];
+const isProd = process.env.NODE_ENV === 'production' || !!process.env.RAILWAY_ENVIRONMENT;
 function originAllowed(origin, cb) {
-  // allow file:// (origin=null), allowed list, and any localhost port
-  if (!origin || origin === 'null' || ALLOWED_ORIGINS.includes(origin) || /^http:\/\/localhost(:\d+)?$/.test(origin)) {
+  const allowNull = !isProd; // file:// (origin=null) allowed in dev only
+  if (!origin || (origin === 'null' && allowNull) || ALLOWED_ORIGINS.includes(origin) || /^http:\/\/localhost(:\d+)?$/.test(origin)) {
     cb(null, true);
   } else {
     cb(new Error('CORS: origin not allowed'));
@@ -150,6 +152,13 @@ const pendingRemovals = {};
 
 // Chat rate limit: max 1 message per 500ms per socket
 const _chatLastTs = new Map();
+
+// Session name cache for interaction sig alerts (must be declared before main connection handler)
+const sessions = {};
+io.on('connection', s => {
+  s.on('joinTable', ({playerName}) => { sessions[s.id] = {name:playerName}; });
+  s.on('disconnect', () => { delete sessions[s.id]; });
+});
 
 // ── Socket events ─────────────────────────────────────────────────
 io.on('connection', async (socket) => {
@@ -660,7 +669,7 @@ io.on('connection', async (socket) => {
   });
 
   socket.on('joinAdmin', ({ secret }) => {
-    if (secret === (process.env.ADMIN_SECRET || 'rf_admin_2025')) {
+    if (secret === (ADMIN_SECRET)) {
       socket.join('admin');
       socket.emit('adminSnapshot', {
         tables: tableManager.getTableList().map(t=>({ ...t, state: tableManager.getTableState(t.id) })),
@@ -676,30 +685,30 @@ io.on('connection', async (socket) => {
   });
 
   socket.on('adminCreateTournament', ({ secret, config }) => {
-    if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
+    if (secret !== (ADMIN_SECRET)) return;
     const t = tournamentEngine.createTournament({ ...config, adminCreated:true });
     io.to('admin').emit('tournCreated', tournamentEngine.getState(t.id));
   });
 
   socket.on('adminStartTournament', ({ secret, tournId }) => {
-    if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
+    if (secret !== (ADMIN_SECRET)) return;
     const result = tournamentEngine.start(tournId, io);
     if (result.ok) io.emit('tournStarted', tournamentEngine.getState(tournId));
   });
 
   socket.on('adminPauseTournament', ({ secret, tournId }) => {
-    if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
+    if (secret !== (ADMIN_SECRET)) return;
     tournamentEngine.pause(tournId);
     io.emit('tournPaused', { id:tournId });
   });
 
   socket.on('adminBroadcast', ({ secret, message }) => {
-    if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
+    if (secret !== (ADMIN_SECRET)) return;
     io.emit('adminBroadcast', { message, timestamp: Date.now() });
   });
 
   socket.on('adminKickPlayer', ({ secret, socketId, reason }) => {
-    if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
+    if (secret !== (ADMIN_SECRET)) return;
     io.to(socketId).emit('kicked', { reason: reason || 'Removed by admin' });
     const { affected } = tableManager.removePlayer(socketId);
     affected.forEach(tid => io.to(tid).emit('tableState', tableManager.getTableState(tid)));
@@ -707,7 +716,7 @@ io.on('connection', async (socket) => {
 
   // ── Admin asset push (Blender table / background) ──────────────
   socket.on('adminPushAsset', ({ secret, type, name, pushedAt, dataUrl, cameraRadius }) => {
-    if (secret !== (process.env.ADMIN_SECRET || 'rf_admin_2025')) return;
+    if (secret !== (ADMIN_SECRET)) return;
     const ts = pushedAt || new Date().toISOString();
     if (dataUrl) {
       _pushedAssets[type] = { type, name: name || null, pushedAt: ts, dataUrl, cameraRadius: cameraRadius ?? null };
@@ -846,13 +855,6 @@ io.on('connection', async (socket) => {
   });
 });
 
-// Session name cache for interaction sig alerts
-const sessions = {};
-io.on('connection', s => {
-  s.on('joinTable', ({playerName}) => { sessions[s.id] = {name:playerName}; });
-  s.on('disconnect', () => { delete sessions[s.id]; });
-});
-
 // Track last reality-check per user (userId → timestamp)
 const _lastRealityCheck = {};
 
@@ -896,9 +898,6 @@ antiCheat.on('alert', (alert) => {
 const { initAuth } = require('./auth');
 
 const PORT = process.env.PORT || 3001;
-if (!process.env.ADMIN_SECRET) {
-  console.warn('[SECURITY] ADMIN_SECRET env var not set — using insecure default. Set it in Railway variables.');
-}
 initAuth().then(async () => {
   await _loadAssetsFromDB();
   server.listen(PORT, () => console.log(`Royal Flush backend :${PORT}`));
