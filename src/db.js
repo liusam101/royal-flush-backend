@@ -9,14 +9,15 @@ let pool = null;
 
 function getPool() {
   if (!pool && process.env.DATABASE_URL) {
+    const sslMode = process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false };
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false }, // required for Railway
+      ssl: sslMode,
     });
     pool.on('error', (err) => {
       console.error('[DB] Unexpected pool error:', err.message);
     });
-    console.log('[DB] PostgreSQL pool created');
+    console.log(`[DB] PostgreSQL pool created (SSL: ${sslMode === false ? 'disabled (private network)' : 'enabled, cert validation off'})`);
   }
   return pool;
 }
