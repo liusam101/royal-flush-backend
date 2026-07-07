@@ -11,6 +11,7 @@ function generateOTP() {
   return String(100000 + (crypto.randomBytes(3).readUIntBE(0, 3) % 900000));
 }
 const { antiCheat } = require('./antiCheat');
+const { ADMIN_SECRET } = require('./config');
 
 const _otpCooldown  = new Map(); // userId → timestamp of last send
 const _otpAttempts  = new Map(); // userId → { count, resetAt } — brute-force guard
@@ -21,11 +22,22 @@ const _loginAttempts = new Map(); // ip → { count, resetAt } — brute-force g
 const LOGIN_MAX_TRIES = 10;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 
+const _registerAttempts = new Map(); // ip → { count, resetAt }
+const REGISTER_MAX = 5;
+const REGISTER_WINDOW_MS = 60 * 60 * 1000; // 5 accounts per IP per hour
+
 // ── Register ──────────────────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
+    const now = Date.now();
+    let rAtt = _registerAttempts.get(ip);
+    if (!rAtt || now > rAtt.resetAt) rAtt = { count: 0, resetAt: now + REGISTER_WINDOW_MS };
+    if (rAtt.count >= REGISTER_MAX)
+      return res.status(429).json({ error: 'Too many accounts created from this network. Try again later.' });
+    rAtt.count++;
+    _registerAttempts.set(ip, rAtt);
     const acCheck = antiCheat.onConnect('reg-'+Date.now(), username, ip);
     if (acCheck.blocked) return res.status(403).json({ error: 'Registration not available.' });
     const result = await register({ username, email, password });
@@ -166,14 +178,14 @@ router.post('/reset-password', async (req, res) => {
 // ── Admin ─────────────────────────────────────────────────────────────────
 router.get('/users', async (req, res) => {
   const key = req.headers['x-admin-key'] || req.query.key;
-  if (key !== (process.env.ADMIN_SECRET || 'rf_admin_2025'))
+  if (key !== (ADMIN_SECRET))
     return res.status(401).json({ error: 'Unauthorized' });
   try { res.json(await getAllUsers()); } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
 router.post('/ban', async (req, res) => {
   const key = req.headers['x-admin-key'] || req.query.key;
-  if (key !== (process.env.ADMIN_SECRET || 'rf_admin_2025'))
+  if (key !== (ADMIN_SECRET))
     return res.status(401).json({ error: 'Unauthorized' });
   try { res.json({ ok: await banUser(req.body.userId) }); }
   catch(e) { res.status(500).json({ error: 'Server error' }); }
