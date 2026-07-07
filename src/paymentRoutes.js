@@ -126,6 +126,11 @@ router.post('/webhook', async (req, res) => {
       const { userId, packageId } = session.metadata;
       const pkg = PACKAGES[packageId];
       if (userId && pkg) {
+        if (session.amount_total !== pkg.usd * 100) {
+          console.error(`[Webhook] Amount mismatch for session ${session.id}: ` +
+            `charged ${session.amount_total}, expected ${pkg.usd * 100}. Skipping credit.`);
+          return res.json({ received: true });
+        }
         try {
           await creditSession(session.id, userId, pkg);
         } catch(e) {
@@ -155,6 +160,10 @@ router.get('/verify/:sessionId', authMiddleware, async (req, res) => {
 
     const pkg = PACKAGES[session.metadata.packageId];
     if (!pkg) return res.status(400).json({ error: 'Unknown package.' });
+
+    if (session.amount_total !== pkg.usd * 100) {
+      return res.status(400).json({ error: 'Payment amount mismatch.' });
+    }
 
     const credited = await creditSession(session.id, req.user.id, pkg);
     res.json({ ok: true, credited, gold: pkg.gold, royal: pkg.royal, usd: pkg.usd, label: pkg.label });
