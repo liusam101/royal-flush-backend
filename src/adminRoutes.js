@@ -7,7 +7,7 @@ const { tableManager }       = require('./tableManager');
 const { tournamentEngine }   = require('./tournamentEngine');
 const { antiCheat }          = require('./antiCheat');
 
-const ADMIN_SECRET = process.env.ADMIN_SECRET || 'rf_admin_2025';
+const { ADMIN_SECRET } = require('./config');
 
 // ── Auth middleware ──────────────────────────────────────────────
 function auth(req, res, next) {
