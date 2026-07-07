@@ -8,8 +8,7 @@ const crypto = require('crypto');
 const fs     = require('fs');
 const path   = require('path');
 
-const JWT_SECRET  = process.env.JWT_SECRET || 'rf_jwt_dev_secret_change_in_production';
-if (!process.env.JWT_SECRET) console.warn('[Auth] JWT_SECRET not set — using insecure default. Set JWT_SECRET env var in production.');
+const { JWT_SECRET } = require('./config');
 const JWT_EXPIRY  = '30d';
 const SALT_ROUNDS = 12;
 
@@ -83,8 +82,8 @@ function validate({ username, email, password }) {
     return 'Username may only contain letters, numbers, underscores, hyphens, and periods.';
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
     return 'Please enter a valid email address.';
-  if (!password || password.length < 6)
-    return 'Password must be at least 6 characters.';
+  if (!password || password.length < 8)
+    return 'Password must be at least 8 characters.';
   return null;
 }
 
@@ -301,7 +300,7 @@ async function verifyOTP(userId, code) {
 
 // ── Password reset ────────────────────────────────────────────────────────
 async function resetPassword(userId, newPassword) {
-  if (newPassword.length < 6) return { ok: false, error: 'Password must be at least 6 characters.' };
+  if (newPassword.length < 8) return { ok: false, error: 'Password must be at least 8 characters.' };
   const hash = await bcrypt.hash(newPassword, SALT_ROUNDS);
   if (useDB) {
     await db.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, userId]);
