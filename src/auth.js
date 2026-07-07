@@ -198,11 +198,14 @@ function verifyToken(token) {
 // ══════════════════════════════════════════════════════════════════════════
 // CHIP UPDATES
 // ══════════════════════════════════════════════════════════════════════════
-async function updateChips(userId, deltaRoyal, deltaGold) {
+async function updateChips(userId, deltaRoyal, deltaGold, client = null) {
   if (useDB) {
-    if (deltaRoyal) await db.query(
+    const run = client
+      ? (sql, params) => client.query(sql, params)
+      : (sql, params) => db.query(sql, params);
+    if (deltaRoyal) await run(
       'UPDATE users SET chips = GREATEST(0, chips + $1) WHERE id=$2', [deltaRoyal, userId]);
-    if (deltaGold) await db.query(
+    if (deltaGold) await run(
       'UPDATE users SET gold_chips = GREATEST(0, gold_chips + $1) WHERE id=$2', [deltaGold, userId]);
   } else {
     const users = loadUsers();
