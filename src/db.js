@@ -146,4 +146,21 @@ async function initDB() {
   }
 }
 
-module.exports = { query, queryOne, initDB, getPool };
+async function withTransaction(fn) {
+  const p = getPool();
+  if (!p) throw new Error('No database connection');
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = { query, queryOne, initDB, getPool, withTransaction };
