@@ -16,7 +16,7 @@ const lifetimeStats                     = require('./lifetimeStats');
 const { verifyTokenAsync, updateChips, updateStats } = require('./auth');
 const { ADMIN_SECRET } = require('./config');
 const rg = require('./responsibleGambling');
-const { query: dbQuery }                       = require('./db');
+const { query: dbQuery, withTransaction, getPool } = require('./db');
 
 const app    = express();
 const server = http.createServer(app);
@@ -122,6 +122,56 @@ function tryStartNewHand(tableId) {
   dealCardsToAll(tableId);
   const tbl = tableManager.getTables ? tableManager.getTables()[tableId] : null;
   handHistory.startHand(tableId, newState.seats||[], { sb: newState.sb, bb: newState.bb });
+}
+
+// Settles all authenticated players' chip deltas for one finished hand ATOMICALLY,
+// then applies in-memory/side effects only after the DB commit succeeds.
+// statsMode: 'showdown' (playerAction), 'leave' (leaveTable), 'fold' (disconnect/autofold)
+async function settleHandChips(tableId, hr, statsMode) {
+  const finalState = tableManager.getTableState(tableId);
+  if (!finalState?.seats) return;
+
+  // Phase 1 — collect deltas (no writes yet)
+  const entries = [];
+  for (const seat of finalState.seats) {
+    const skt = io.sockets.sockets.get(seat.socketId);
+    if (!skt?.userId) continue;
+    const trueNow = (skt.offTableChips ?? 0) + seat.stack;
+    const delta = trueNow - (skt.chips || 0);
+    entries.push({ seat, skt, trueNow, delta });
+  }
+
+  // Phase 2 — apply all non-zero chip deltas in ONE transaction
+  const toWrite = entries.filter(e => Math.abs(e.delta) > 0.001);
+  if (toWrite.length) {
+    if (getPool()) {
+      await withTransaction(async (client) => {
+        for (const e of toWrite) {
+          await updateChips(e.skt.userId, e.delta, 0, client);
+        }
+      });
+    } else {
+      // Local dev JSON fallback — no transactions available; sequential as before
+      for (const e of toWrite) await updateChips(e.skt.userId, e.delta, 0);
+    }
+  }
+
+  // Phase 3 — post-commit side effects (only runs if the transaction succeeded)
+  const isShowdown = statsMode === 'showdown' && hr?.reason === 'showdown';
+  for (const e of entries) {
+    if (Math.abs(e.delta) > 0.001) e.skt.chips = e.trueNow;
+    const isWinner = e.seat.name === hr?.winner;
+    if (!isWinner && e.delta < 0 && statsMode !== 'leave')
+      rg.recordLoss(e.skt.userId, Math.abs(e.delta)).catch(() => {});
+    updateStats(e.skt.userId, {
+      handPlayed: 1,
+      won: isWinner ? 1 : 0,
+      amountWon: isWinner ? (hr?.amount || 0) : 0,
+      amountLost: (statsMode !== 'leave' && !isWinner && e.delta < 0) ? Math.abs(e.delta) : 0,
+      showdownWin: isShowdown && isWinner ? 1 : 0,
+      showdownPlayed: isShowdown ? 1 : 0,
+    }).catch(() => {});
+  }
 }
 
 // Quick equity heuristic — replace with proper Monte Carlo later.
@@ -319,31 +369,8 @@ io.on('connection', async (socket) => {
       }
       io.to(tableId).emit('handResult', hr);
       handHistory.endHand(tableId, hr);
-      const finalState = tableManager.getTableState(tableId);
-      if (finalState?.seats) {
-        for (const seat of finalState.seats) {
-          const skt = io.sockets.sockets.get(seat.socketId); // O(1) Map lookup
-          if (skt?.userId) {
-            const trueNow = (skt.offTableChips ?? 0) + seat.stack;
-            const delta = trueNow - (skt.chips || 0);
-            if (Math.abs(delta) > 0.001) {
-              await updateChips(skt.userId, delta, 0);
-              skt.chips = trueNow;
-            }
-            const isWinner = seat.name === hr?.winner;
-            // Record losses for RG loss-limit tracking
-            if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta)).catch(()=>{});
-            updateStats(skt.userId, {
-              handPlayed: 1,
-              won: isWinner ? 1 : 0,
-              amountWon: isWinner ? (hr?.amount || 0) : 0,
-              amountLost: !isWinner && delta < 0 ? Math.abs(delta) : 0,
-              showdownWin: isShowdown && isWinner ? 1 : 0,
-              showdownPlayed: isShowdown ? 1 : 0,
-            }).catch(() => {});
-          }
-        }
-      }
+      try { await settleHandChips(tableId, hr, 'showdown'); }
+      catch(e) { console.error(`[Settle] failed for ${tableId}:`, e.message); }
       setTimeout(() => tryStartNewHand(tableId), 3500);
     }
   });
@@ -373,27 +400,8 @@ io.on('connection', async (socket) => {
       const hr = leaveResult.handResult;
       io.to(tableId).emit('handResult', hr);
       handHistory.endHand(tableId, hr);
-      const finalState = tableManager.getTableState(tableId);
-      if (finalState?.seats) {
-        for (const seat of finalState.seats) {
-          const skt = io.sockets.sockets.get(seat.socketId); // O(1) Map lookup
-          if (skt?.userId) {
-            const trueNow = (skt.offTableChips ?? 0) + seat.stack;
-            const delta = trueNow - (skt.chips || 0);
-            if (Math.abs(delta) > 0.001) {
-              await updateChips(skt.userId, delta, 0);
-              skt.chips = trueNow;
-            }
-            // Credit the winner's stats (loser left, so no loser stats here)
-            const isWinner = seat.name === hr?.winner;
-            updateStats(skt.userId, {
-              handPlayed: 1, won: isWinner ? 1 : 0,
-              amountWon: isWinner ? (hr?.amount || 0) : 0, amountLost: 0,
-              showdownWin: 0, showdownPlayed: 0,
-            }).catch(() => {});
-          }
-        }
-      }
+      try { await settleHandChips(tableId, hr, 'leave'); }
+      catch(e) { console.error(`[Settle] failed for ${tableId}:`, e.message); }
       setTimeout(() => tryStartNewHand(tableId), 3500);
     }
 
@@ -749,23 +757,8 @@ io.on('connection', async (socket) => {
     for (const { tableId, handResult: hr } of handResults) {
       io.to(tableId).emit('handResult', hr);
       handHistory.endHand(tableId, hr);
-      const finalState = tableManager.getTableState(tableId);
-      if (finalState?.seats) {
-        for (const seat of finalState.seats) {
-          const skt = io.sockets.sockets.get(seat.socketId); // O(1) Map lookup
-          if (skt?.userId) {
-            const trueNow = (skt.offTableChips ?? 0) + seat.stack;
-            const delta = trueNow - (skt.chips || 0);
-            if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = trueNow; }
-            const isWinner = seat.name === hr?.winner;
-            if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta)).catch(()=>{});
-            updateStats(skt.userId, { handPlayed: 1, won: isWinner ? 1 : 0,
-              amountWon: isWinner ? (hr?.amount || 0) : 0,
-              amountLost: !isWinner && delta < 0 ? Math.abs(delta) : 0,
-              showdownWin: 0, showdownPlayed: 0 }).catch(() => {});
-          }
-        }
-      }
+      try { await settleHandChips(tableId, hr, 'fold'); }
+      catch(e) { console.error(`[Settle] failed for ${tableId}:`, e.message); }
       setTimeout(() => tryStartNewHand(tableId), 3500);
     }
 
@@ -830,23 +823,8 @@ io.on('connection', async (socket) => {
         const hr = result.handResult;
         io.to(tid).emit('handResult', hr);
         handHistory.endHand(tid, hr);
-        const finalState = tableManager.getTableState(tid);
-        if (finalState?.seats) {
-          for (const seat of finalState.seats) {
-            const skt = io.sockets.sockets.get(seat.socketId); // O(1) Map lookup
-            if (skt?.userId) {
-              const trueNow = (skt.offTableChips ?? 0) + seat.stack;
-              const delta = trueNow - (skt.chips || 0);
-              if (Math.abs(delta) > 0.001) { await updateChips(skt.userId, delta, 0); skt.chips = trueNow; }
-              const isWinner = seat.name === hr?.winner;
-              if (!isWinner && delta < 0) rg.recordLoss(skt.userId, Math.abs(delta)).catch(()=>{});
-              updateStats(skt.userId, { handPlayed: 1, won: isWinner ? 1 : 0,
-                amountWon: isWinner ? (hr?.amount || 0) : 0,
-                amountLost: !isWinner && delta < 0 ? Math.abs(delta) : 0,
-                showdownWin: 0, showdownPlayed: 0 }).catch(() => {});
-            }
-          }
-        }
+        try { await settleHandChips(tid, hr, 'fold'); }
+        catch(e) { console.error(`[Settle] failed for ${tid}:`, e.message); }
         setTimeout(() => tryStartNewHand(tid), 3500);
       } else if (state.phase === 'starting' || state.phase === 'waiting') {
         setTimeout(() => tryStartNewHand(tid), 3500);
