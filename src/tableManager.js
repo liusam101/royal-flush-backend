@@ -1,4 +1,5 @@
 const { GameEngine, bestFive, compareScore } = require('./gameEngine');
+const { roundMoney } = require('./money');
 
 const tables = {};
 
@@ -182,7 +183,7 @@ const tableManager = {
       if (remaining.length === 1 && t.pot > 0) {
         let foldRake = 0;
         if (!t.isTournament && t.pot >= 1) {
-          foldRake = Math.min(Math.round(t.pot * 0.025 * 100) / 100, 3.00);
+          foldRake = Math.min(roundMoney(t.pot * 0.025), 3.00);
           t._rakeCollected = (t._rakeCollected || 0) + foldRake;
         }
         remaining[0].stack += (t.pot - foldRake);
@@ -328,7 +329,7 @@ const tableManager = {
       // Rake on fold wins too (but only if pot is big enough)
       let foldRake = 0;
       if (!t.isTournament && t.pot >= 1) {
-        foldRake = Math.min(Math.round(t.pot * 0.025 * 100) / 100, 3.00);
+        foldRake = Math.min(roundMoney(t.pot * 0.025), 3.00);
         t._rakeCollected = (t._rakeCollected || 0) + foldRake;
       }
       active[0].stack += (t.pot - foldRake);
@@ -402,7 +403,7 @@ const tableManager = {
       // ── Rake: 2.5% of pot, capped at $3 (exempt: tournaments, pots < $1)
       let rake = 0;
       if (!t.isTournament && totalPot >= 1) {
-        rake = Math.min(Math.round(totalPot * 0.025 * 100) / 100, 3.00);
+        rake = Math.min(roundMoney(totalPot * 0.025), 3.00);
         t._rakeCollected = (t._rakeCollected || 0) + rake;
       }
       const net = totalPot - rake;
@@ -411,7 +412,7 @@ const tableManager = {
       const share = Math.floor(net / winSeats.length * 100) / 100;
       winSeats.forEach(w => w.stack += share);
       // Rounding remainder (pennies) goes to the first winner
-      const remainder = Math.round((net - share * winSeats.length) * 100) / 100;
+      const remainder = roundMoney(net - share * winSeats.length);
       if (remainder > 0 && winSeats[0]) winSeats[0].stack += remainder;
       const showCards = active.map(s => ({ name: s.name, cards: s.cards }));
       const handResult = { winner: result.winner, winners: result.winners, hand: result.hand, amount: net, rake, board: t.board, showCards };
@@ -429,7 +430,7 @@ const tableManager = {
         .map(n => eligible.find(s => s.name === n)).filter(Boolean);
       const share = Math.floor(sp.amount / winSeats.length * 100) / 100;
       winSeats.forEach(w => w.stack += share);
-      const remainder = Math.round((sp.amount - share * winSeats.length) * 100) / 100;
+      const remainder = roundMoney(sp.amount - share * winSeats.length);
       if (remainder > 0 && winSeats[0]) winSeats[0].stack += remainder;
       lastWinner = result.winner;
       lastHand   = result.hand;
