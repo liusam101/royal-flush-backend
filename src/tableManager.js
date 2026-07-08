@@ -14,7 +14,7 @@ DEFAULT_TABLES.forEach(t => {
     seats: [], engine: new GameEngine(t.sb, t.bb),
     phase: 'waiting', pot: 0, sidePots: [], board: [],
     actIdx: 0, dealerIdx: 0,
-    lastRaiseSize: 0, bbIdx: 0, preflopBBActed: false, actionsThisRound: 0, roundStartIdx: -1,
+    lastRaiseSize: 0, bbIdx: 0,
   };
 });
 
@@ -65,7 +65,7 @@ const tableManager = {
       seats: [], engine: new GameEngine(sb, bb),
       phase: 'waiting', pot: 0, sidePots: [], board: [],
       actIdx: 0, dealerIdx: 0, isTournament,
-      lastRaiseSize: 0, bbIdx: 0, preflopBBActed: false, actionsThisRound: 0, roundStartIdx: -1,
+      lastRaiseSize: 0, bbIdx: 0,
     };
   },
 
@@ -270,29 +270,31 @@ const tableManager = {
       actor.totalBet = (actor.totalBet||0) + pay;
       t.pot += pay;
     } else if (action === 'raise') {
-      // Check straddle BEFORE updating bet (straddle = first raise preflop from bet=0)
-      const isBlindRaise = t.phase === 'preflop' && (actor.bet || 0) === 0;
       const minRaise  = Math.max(t.bb, t.lastRaiseSize || t.bb);
       const minTotal  = maxBet + minRaise;
       const reqTotal  = Math.max(minTotal, Number(amount) || minTotal);
       const total     = Math.min(reqTotal, actor.stack + (actor.bet||0));
       // Only update lastRaiseSize for full raises — a short all-in doesn't reopen betting
       const newRaiseSize = total - maxBet;
-      if (newRaiseSize >= minRaise) t.lastRaiseSize = newRaiseSize;
+      if (newRaiseSize >= minRaise) {
+        t.lastRaiseSize = newRaiseSize;
+        // Full raise reopens the action — everyone else must respond again
+        t.seats.forEach(s => { if (s !== actor) s.acted = false; });
+      } else {
+        // Short all-in: does NOT reopen action for players who already acted,
+        // but players who haven't yet acted still get their turn (their flag
+        // is already false). Do not clear flags here.
+      }
       const extra     = total - (actor.bet||0);
       actor.stack    -= Math.max(0, extra);
       actor.totalBet  = (actor.totalBet||0) + Math.max(0, extra);
       actor.bet       = total;
       t.pot          += Math.max(0, extra);
-      t.preflopBBActed = false;
-      t._straddleActive = isBlindRaise;
-      t.actionsThisRound = 0; // Reset — raise counts as 1 via the increment below
-      t.roundStartIdx = t.actIdx;
     }
 
-    if (t.phase === 'preflop' && t.actIdx === t.bbIdx) t.preflopBBActed = true;
-    t.actionsThisRound = (t.actionsThisRound||0) + 1;
-    if (t.roundStartIdx === -1) t.roundStartIdx = t.actIdx;
+    // TODO: a short all-in does not give players who already acted another turn.
+    // Enforcing call-or-fold-only after a short all-in is out of scope.
+    actor.acted = true;
 
     // Only one active player left → wins immediately
     const active = t.seats.filter(s => !s.folded);
@@ -313,7 +315,7 @@ const tableManager = {
 
     if (this._bettingDone(tableId)) {
       // All-in runout — everyone remaining is all-in
-      const canAct = t.seats.filter(s => !s.folded && s.stack > 0);
+      const canAct = t.seats.filter(s => !s.folded && s.stack > 0 && s.cards?.length > 0);
       if (canAct.length <= 1) {
         const result = this._runItOut(tableId);
         if (result) return { ok: true, handOver: true, handResult: result };
@@ -427,8 +429,7 @@ const tableManager = {
     const t = tables[tableId];
     t.engine.newDeck();
     t.board = []; t.pot = 0; t.sidePots = []; t.phase = 'preflop';
-    t.lastRaiseSize = t.bb; t.preflopBBActed = false;
-    t.actionsThisRound = 0; t.roundStartIdx = -1;
+    t.lastRaiseSize = t.bb;
     t.seats.forEach(s => { s.folded = false; s.bet = 0; s.totalBet = 0; s.cards = t.engine.dealTwo(); });
 
     const n = t.seats.length;
@@ -440,8 +441,6 @@ const tableManager = {
       const bb = Math.min(t.bb, t.seats[bbIdx].stack);
       t.seats[sbIdx].stack -= sb; t.seats[sbIdx].bet = sb; t.seats[sbIdx].totalBet = sb; t.pot += sb;
       t.seats[bbIdx].stack -= bb; t.seats[bbIdx].bet = bb; t.seats[bbIdx].totalBet = bb; t.pot += bb;
-      // If BB is all-in from posting the blind, they've had their "option" by definition
-      if (t.seats[bbIdx].stack === 0) t.preflopBBActed = true;
       t.actIdx = sbIdx;
     } else {
       const sbIdx = (t.dealerIdx + 1) % n;
@@ -451,10 +450,10 @@ const tableManager = {
       const bb = Math.min(t.bb, t.seats[bbIdx].stack);
       t.seats[sbIdx].stack -= sb; t.seats[sbIdx].bet = sb; t.seats[sbIdx].totalBet = sb; t.pot += sb;
       t.seats[bbIdx].stack -= bb; t.seats[bbIdx].bet = bb; t.seats[bbIdx].totalBet = bb; t.pot += bb;
-      // If BB is all-in from posting the blind, they've had their "option" by definition
-      if (t.seats[bbIdx].stack === 0) t.preflopBBActed = true;
       t.actIdx = (bbIdx + 1) % n;
     }
+    // Posting a blind is not acting — reset after blinds so BB retains their option
+    t.seats.forEach(s => s.acted = false);
     console.log(`    [${tableId}] Hand — ${t.seats.map(s=>s.name).join(' vs ')} | pot=$${t.pot}`);
   },
 
@@ -462,7 +461,7 @@ const tableManager = {
     const t = tables[tableId];
     let next = (t.actIdx + 1) % t.seats.length;
     let loops = 0;
-    while ((t.seats[next].folded || t.seats[next].stack === 0) && loops < t.seats.length) {
+    while ((t.seats[next].folded || t.seats[next].stack === 0 || !(t.seats[next].cards?.length)) && loops < t.seats.length) {
       next = (next + 1) % t.seats.length;
       loops++;
     }
@@ -485,32 +484,19 @@ const tableManager = {
 
   _bettingDone(tableId) {
     const t = tables[tableId];
-    const canAct = t.seats.filter(s => !s.folded && s.stack > 0);
+    const canAct = t.seats.filter(s => !s.folded && s.stack > 0 && (s.cards?.length > 0));
     if (!canAct.length) return true;
     const maxBet = Math.max(0, ...t.seats.map(s => s.bet||0));
-    // Everyone must have equal bets (or be all-in)
-    if (!canAct.every(s => (s.bet||0) === maxBet || s.stack === 0)) return false;
-    // Preflop: BB must have had option (or raised)
-    if (t.phase === 'preflop' && !t.preflopBBActed) return false;
-    // After a straddle (live blind raise): need full orbit PLUS straddler's option
-    // actionsThisRound: raise=1, n-1 others, then straddler = n+1 total → need > n
-    if (t._straddleActive) {
-      if ((t.actionsThisRound||0) <= canAct.length) return false;
-      return true;
-    }
-    // Standard betting: raise counts as 1, n-1 others must act → n total
-    if ((t.actionsThisRound||0) < canAct.length) return false;
+    // Everyone still able to act must have matched the bet AND acted since the last raise
+    if (!canAct.every(s => (s.bet||0) === maxBet)) return false;
+    if (!canAct.every(s => s.acted)) return false;
     return true;
   },
 
   _advancePhase(tableId) {
     const t = tables[tableId];
-    t.seats.forEach(s => s.bet = 0);
+    t.seats.forEach(s => { s.bet = 0; s.acted = false; });
     t.lastRaiseSize = t.bb;
-    t.preflopBBActed = true;
-    t.actionsThisRound = 0;
-    t.roundStartIdx = -1;
-    t._straddleActive = false; // Straddle only applies preflop
 
     let first = (t.dealerIdx + 1) % t.seats.length;
     let loops = 0;
@@ -534,9 +520,9 @@ const tableManager = {
   _resetHand(tableId) {
     const t = tables[tableId];
     t.pot = 0; t.board = []; t.sidePots = []; t.phase = 'starting'; t.actIdx = 0;
-    t.lastRaiseSize = 0; t.preflopBBActed = false; t.actionsThisRound = 0; t.roundStartIdx = -1;
+    t.lastRaiseSize = 0;
     t.seats.forEach(s => {
-      s.bet = 0; s.totalBet = 0; s.folded = false; s.cards = [];
+      s.bet = 0; s.totalBet = 0; s.folded = false; s.cards = []; s.acted = false;
       if (s._autoFoldTimer) { clearTimeout(s._autoFoldTimer); s._autoFoldTimer = null; }
       // Players who joined mid-hand are now ready to play
       if (s.pendingActive) { s.sitOut = false; s.pendingActive = false; }
