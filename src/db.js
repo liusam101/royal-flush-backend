@@ -138,6 +138,19 @@ async function initDB() {
         sessions           JSONB NOT NULL DEFAULT '[]',
         losses             JSONB NOT NULL DEFAULT '[]'
       );
+
+      CREATE TABLE IF NOT EXISTS tournament_entries (
+        id         SERIAL PRIMARY KEY,
+        tourn_id   TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        username   TEXT,
+        buy_in     NUMERIC(12,2) NOT NULL,
+        prize      NUMERIC(12,2) NOT NULL DEFAULT 0,
+        status     TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ DEFAULT now(),
+        updated_at TIMESTAMPTZ DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_tournament_entries_status ON tournament_entries(status);
     `);
     console.log('[DB] Tables ready');
     return true;
