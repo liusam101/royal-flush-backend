@@ -17,6 +17,7 @@ const { verifyTokenAsync, updateChips, updateStats } = require('./auth');
 const { ADMIN_SECRET } = require('./config');
 const rg = require('./responsibleGambling');
 const { query: dbQuery, withTransaction, getPool } = require('./db');
+const { moneyNonZero } = require('./money');
 
 const app    = express();
 const server = http.createServer(app);
@@ -144,7 +145,7 @@ async function settleHandChips(tableId, hr, statsMode) {
   }
 
   // Phase 2 — apply all non-zero chip deltas in ONE transaction
-  const toWrite = entries.filter(e => Math.abs(e.delta) > 0.001);
+  const toWrite = entries.filter(e => moneyNonZero(e.delta));
   if (toWrite.length) {
     if (getPool()) {
       await withTransaction(async (client) => {
@@ -161,7 +162,7 @@ async function settleHandChips(tableId, hr, statsMode) {
   // Phase 3 — post-commit side effects (only runs if the transaction succeeded)
   const isShowdown = statsMode === 'showdown' && hr?.reason === 'showdown';
   for (const e of entries) {
-    if (Math.abs(e.delta) > 0.001) e.skt.chips = e.trueNow;
+    if (moneyNonZero(e.delta)) e.skt.chips = e.trueNow;
     const isWinner = e.seat.name === hr?.winner;
     if (!isWinner && e.delta < 0 && statsMode !== 'leave')
       rg.recordLoss(e.skt.userId, Math.abs(e.delta)).catch(() => {});
@@ -411,7 +412,7 @@ io.on('connection', async (socket) => {
       // True balance = what was left off-table + what they're cashing out with
       const trueBalance = (socket.offTableChips ?? 0) + returnedStack;
       const delta = trueBalance - (socket.chips || 0);
-      if (Math.abs(delta) > 0.001) {
+      if (moneyNonZero(delta)) {
         await updateChips(socket.userId, delta, 0);
       }
       // Track losses for RG limits — leaving mid-hand forfeits pot
@@ -818,7 +819,7 @@ io.on('connection', async (socket) => {
             // Compute delta from the DB baseline so we don't add chips incorrectly
             const trueBalance = savedOffTable + stack;
             const delta = trueBalance - savedChips;
-            if (Math.abs(delta) > 0.001) await updateChips(savedUserId, delta, 0).catch(() => {});
+            if (moneyNonZero(delta)) await updateChips(savedUserId, delta, 0).catch(() => {});
             rg.endSession(savedUserId).catch(() => {});
             console.log(`    [DC] ${savedSocketId} timed out — seat removed, balance $${trueBalance.toFixed(2)}`);
           }
