@@ -124,6 +124,8 @@ function tryStartNewHand(tableId) {
   handHistory.startHand(tableId, newState.seats||[], { sb: newState.sb, bb: newState.bb });
 }
 
+// Cash-table crash safety depends on the DB only ever being written via settlement deltas.
+// Never debit cash-table buy-ins from the DB at join time.
 // Settles all authenticated players' chip deltas for one finished hand ATOMICALLY,
 // then applies in-memory/side effects only after the DB commit succeeds.
 // statsMode: 'showdown' (playerAction), 'leave' (leaveTable), 'fold' (disconnect/autofold)
@@ -483,7 +485,17 @@ io.on('connection', async (socket) => {
         return;
       }
       try {
-        await updateChips(socket.userId, -actualBuyIn, 0);
+        if (getPool()) {
+          await withTransaction(async (client) => {
+            await updateChips(socket.userId, -actualBuyIn, 0, client);
+            await client.query(
+              `INSERT INTO tournament_entries (tourn_id, user_id, username, buy_in, status)
+               VALUES ($1, $2, $3, $4, 'active')`,
+              [tourn.id, socket.userId, socket.username || playerName, actualBuyIn]);
+          });
+        } else {
+          await updateChips(socket.userId, -actualBuyIn, 0);
+        }
         socket.chips = Math.max(0, (socket.chips || 0) - actualBuyIn);
       } catch(e) {
         tournamentEngine.unregister(tourn.id, socket.id);
@@ -586,11 +598,21 @@ io.on('connection', async (socket) => {
         for (const seat of postState.seats.filter(s => s.stack <= 0)) {
           const elim = tournamentEngine.eliminatePlayer(sngId, seat.socketId);
           if (elim) {
-            // Credit prize to DB immediately (buy-in was debited at sngJoin)
-            if (elim.prize > 0) {
-              const elimSkt = io.sockets.sockets.get(seat.socketId);
-              if (elimSkt?.userId) {
+            // Credit prize and settle ledger row atomically (buy-in was debited at sngJoin)
+            const elimSkt = io.sockets.sockets.get(seat.socketId);
+            if (elimSkt?.userId) {
+              if (getPool()) {
+                await withTransaction(async (client) => {
+                  if (elim.prize > 0) await updateChips(elimSkt.userId, elim.prize, 0, client);
+                  await client.query(
+                    `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
+                     WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
+                    [elim.prize, sngId, elimSkt.userId]);
+                }).catch(e => console.error('[TournLedger]', e.message));
+              } else if (elim.prize > 0) {
                 await updateChips(elimSkt.userId, elim.prize, 0).catch(() => {});
+              }
+              if (elim.prize > 0) {
                 if (elimSkt.chips != null) elimSkt.chips += elim.prize;
                 elimSkt.emit('chipsReturned', { balance: elimSkt.chips || 0 });
               }
@@ -607,13 +629,24 @@ io.on('connection', async (socket) => {
 
       const updatedTourn = tournamentEngine.get(sngId);
       if (updatedTourn.status === 'finished') {
-        // Credit winner prize to DB — results[] has no socketId; use registeredPlayers instead
+        // Credit winner prize and settle ledger row atomically
         const winnerPlayer = updatedTourn.registeredPlayers.find(p => p.place === 1);
-        if (winnerPlayer?.prize > 0) {
-          const wSkt = io.sockets.sockets.get(winnerPlayer.socketId);
-          if (wSkt?.userId) {
-            await updateChips(wSkt.userId, winnerPlayer.prize, 0).catch(() => {});
-            if (wSkt.chips != null) wSkt.chips += winnerPlayer.prize;
+        const wSkt = winnerPlayer ? io.sockets.sockets.get(winnerPlayer.socketId) : null;
+        if (wSkt?.userId) {
+          const wPrize = winnerPlayer.prize || 0;
+          if (getPool()) {
+            await withTransaction(async (client) => {
+              if (wPrize > 0) await updateChips(wSkt.userId, wPrize, 0, client);
+              await client.query(
+                `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
+                 WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
+                [wPrize, sngId, wSkt.userId]);
+            }).catch(e => console.error('[TournLedger]', e.message));
+          } else if (wPrize > 0) {
+            await updateChips(wSkt.userId, wPrize, 0).catch(() => {});
+          }
+          if (wPrize > 0) {
+            if (wSkt.chips != null) wSkt.chips += wPrize;
             wSkt.emit('chipsReturned', { balance: wSkt.chips || 0 });
           }
         }
@@ -873,11 +906,35 @@ antiCheat.on('alert', (alert) => {
   }
 });
 
+// Single-replica assumption: two instances booting simultaneously could double-refund.
+// Current deployment is 1 replica on Railway.
+async function recoverOrphanedTournamentEntries() {
+  if (!getPool()) return;
+  const rows = await dbQuery(
+    `SELECT id, tourn_id, user_id, username, buy_in FROM tournament_entries WHERE status='active'`
+  );
+  for (const r of rows) {
+    try {
+      await withTransaction(async (client) => {
+        await updateChips(r.user_id, Number(r.buy_in), 0, client);
+        await client.query(
+          `UPDATE tournament_entries SET status='refunded', updated_at=now() WHERE id=$1`,
+          [r.id]);
+      });
+      console.log(`[Recovery] Refunded $${r.buy_in} tournament buy-in to ${r.username || r.user_id} (tourn ${r.tourn_id})`);
+    } catch (e) {
+      console.error(`[Recovery] FAILED refund entry ${r.id}:`, e.message);
+    }
+  }
+  if (rows.length) console.log(`[Recovery] Processed ${rows.length} orphaned tournament entries.`);
+}
+
 const { initAuth } = require('./auth');
 
 const PORT = process.env.PORT || 3001;
 initAuth().then(async () => {
   await _loadAssetsFromDB();
+  await recoverOrphanedTournamentEntries();
   server.listen(PORT, () => console.log(`Royal Flush backend :${PORT}`));
 });
 
