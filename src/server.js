@@ -567,8 +567,9 @@ io.on('connection', async (socket) => {
   });
 
   // ── SNG game action (player fold/call/raise during an SNG) ─────
-  socket.on('sngAction', async ({ sngId, action, amount }) => {
-    const tourn = tournamentEngine.get(sngId);
+  socket.on('sngAction', async ({ sngId: tournId, action, amount }) => {
+    // wire field is 'sngId' for back-compat, but it carries the tournament instance id
+    const tourn = tournamentEngine.get(tournId);
     if (!tourn || tourn.status !== 'running') {
       socket.emit('error', { message: 'Tournament not running' });
       return;
@@ -596,7 +597,7 @@ io.on('connection', async (socket) => {
       const postState = tableManager.getTableState(tableId);
       if (postState?.seats) {
         for (const seat of postState.seats.filter(s => s.stack <= 0)) {
-          const elim = tournamentEngine.eliminatePlayer(sngId, seat.socketId);
+          const elim = tournamentEngine.eliminatePlayer(tournId, seat.socketId);
           if (elim) {
             // Credit prize and settle ledger row atomically (buy-in was debited at sngJoin)
             const elimSkt = io.sockets.sockets.get(seat.socketId);
@@ -607,7 +608,7 @@ io.on('connection', async (socket) => {
                   await client.query(
                     `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
                      WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
-                    [elim.prize, sngId, elimSkt.userId]);
+                    [elim.prize, tournId, elimSkt.userId]);
                 }).catch(e => console.error('[TournLedger]', e.message));
               } else if (elim.prize > 0) {
                 await updateChips(elimSkt.userId, elim.prize, 0).catch(() => {});
@@ -627,7 +628,7 @@ io.on('connection', async (socket) => {
         }
       }
 
-      const updatedTourn = tournamentEngine.get(sngId);
+      const updatedTourn = tournamentEngine.get(tournId);
       if (updatedTourn.status === 'finished') {
         // Credit winner prize and settle ledger row atomically
         const winnerPlayer = updatedTourn.registeredPlayers.find(p => p.place === 1);
@@ -640,7 +641,7 @@ io.on('connection', async (socket) => {
               await client.query(
                 `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
                  WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
-                [wPrize, sngId, wSkt.userId]);
+                [wPrize, tournId, wSkt.userId]);
             }).catch(e => console.error('[TournLedger]', e.message));
           } else if (wPrize > 0) {
             await updateChips(wSkt.userId, wPrize, 0).catch(() => {});
@@ -650,10 +651,10 @@ io.on('connection', async (socket) => {
             wSkt.emit('chipsReturned', { balance: wSkt.chips || 0 });
           }
         }
-        io.to('tourn_' + sngId).emit('sngResult', { results: updatedTourn.results });
+        io.to('tourn_' + tournId).emit('sngResult', { results: updatedTourn.results });
         tableManager.removeTable(tableId);
       } else {
-        io.to('tourn_' + sngId).emit('tournState', tournamentEngine.getState(sngId));
+        io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
         setTimeout(() => tryStartNewHand(tableId), 3500);
       }
     }
