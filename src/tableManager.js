@@ -371,8 +371,12 @@ const tableManager = {
 
   _doShowdown(tableId) {
     const t = tables[tableId];
+    // Disconnected player with chips behind = folded for showdown; disconnected all-in stays eligible.
+    const isEligible = (s) =>
+      !s.folded && s.cards && s.cards.length >= 2 &&
+      !(s.disconnected && s.stack > 0);
     // Use side pot logic
-    const active = t.seats.filter(s => !s.folded && s.cards && s.cards.length >= 2);
+    const active = t.seats.filter(isEligible);
 
     if (active.length === 0) {
       this._resetHand(tableId);
@@ -417,7 +421,7 @@ const tableManager = {
     // Multiple side pots (each pot split among tied winners at that level)
     let lastWinner = null, lastHand = null, lastAmount = 0;
     for (const sp of sidePots) {
-      const eligible = sp.eligible.map(i => t.seats[i]).filter(s => !s.folded && s.cards && s.cards.length >= 2);
+      const eligible = sp.eligible.map(i => t.seats[i]).filter(isEligible);
       if (!eligible.length) continue;
       const result = t.engine.showdown(eligible, t.board);
       const winSeats = (result.winners || [result.winner])
