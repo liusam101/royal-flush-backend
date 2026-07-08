@@ -155,7 +155,6 @@ const tournamentEngine = {
       const [sb, bb] = STD_BLINDS[t.blindLevel];
       // Update both the internal engine and the actual tableManager tables
       Object.keys(t.tables).forEach(tid => {
-        t.tables[tid].engine = new GameEngine(sb, bb);
         tableManager.updateBlinds(tid, sb, bb);
       });
       if (io) {
