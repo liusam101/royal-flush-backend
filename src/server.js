@@ -105,6 +105,33 @@ app.get('/api/assets', (req, res) => {
   })));
 });
 
+// List upcoming, registering, and running tournaments for the lobby.
+app.get('/api/tournaments', (req, res) => {
+  const now = Date.now();
+  const list = tournamentEngine.getAll()
+    .filter(t => t.persistent && (t.status === 'scheduled' || t.status === 'registering' || t.status === 'running'))
+    .sort((a, b) => (a.startTime || 0) - (b.startTime || 0))
+    .map(t => {
+      const state = tournamentEngine.getState(t.id);
+      return {
+        id: t.id,
+        name: t.name,
+        buyIn: t.buyIn,
+        startingStack: t.startingStack,
+        blindMins: t.blindMins,
+        maxPlayers: t.maxPlayers,
+        guarantee: t.guarantee,
+        prizes: state?.prizes || [],
+        prizePool: state?.prizePool || 0,
+        registered: t.registeredPlayers.length,
+        startTime: t.startTime,
+        msUntilStart: t.startTime ? t.startTime - now : null,
+        status: t.status,
+      };
+    });
+  res.json({ ok: true, tournaments: list });
+});
+
 // ── Helpers ──────────────────────────────────────────────────────
 function dealCardsToAll(tableId) {
   const cards = tableManager.getPlayerCards(tableId);
@@ -436,18 +463,83 @@ io.on('connection', async (socket) => {
   });
 
   // ── Tournament ─────────────────────────────────────────────────
-  socket.on('tournRegister', ({ tournId, playerName }) => {
-    const result = tournamentEngine.register(tournId, socket.id, socket.username || playerName);
-    if (!result.ok) { socket.emit('error', { message: result.error }); return; }
+  socket.on('tournRegister', async ({ tournId, playerName }) => {
+    const tourn = tournamentEngine.get(tournId);
+    if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
+    if (tourn.status !== 'registering' && tourn.status !== 'scheduled')
+      return socket.emit('error', { message: 'Registration closed' });
+    if (!socket.userId) return socket.emit('error', { message: 'Please sign in to register.' });
+
+    const buyIn = Number(tourn.buyIn) || 0;
+    if (buyIn > 0 && (socket.chips || 0) < buyIn)
+      return socket.emit('error', { message: 'Insufficient balance for this buy-in.' });
+
+    const result = tournamentEngine.register(tournId, socket.id, socket.username || playerName, socket.userId);
+    if (!result.ok) return socket.emit('error', { message: result.error });
+
+    if (buyIn > 0) {
+      try {
+        if (getPool()) {
+          await withTransaction(async (client) => {
+            await updateChips(socket.userId, -buyIn, 0, client);
+            await client.query(
+              `INSERT INTO tournament_entries (tourn_id, user_id, username, buy_in, status)
+               VALUES ($1, $2, $3, $4, 'active')`,
+              [tournId, socket.userId, socket.username || playerName, buyIn]);
+            await client.query(
+              `UPDATE tournaments SET registered=$1, updated_at=now() WHERE id=$2`,
+              [tourn.registeredPlayers.length, tournId]);
+          });
+        } else {
+          await updateChips(socket.userId, -buyIn, 0);
+        }
+        socket.chips = Math.max(0, (socket.chips || 0) - buyIn);
+      } catch(e) {
+        tournamentEngine.unregister(tournId, socket.id, socket.userId);
+        return socket.emit('error', { message: 'Could not process buy-in. Please try again.' });
+      }
+    }
+
     socket.join('tourn_' + tournId);
-    socket.emit('tournRegistered', { tournId, ...result });
+    socket.emit('tournRegistered', { tournId, registered: result.registered, balance: socket.chips });
     io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
     io.to('admin').emit('tournState', tournamentEngine.getState(tournId));
   });
 
-  socket.on('tournUnregister', ({ tournId }) => {
-    tournamentEngine.unregister(tournId, socket.id);
+  socket.on('tournUnregister', async ({ tournId }) => {
+    const tourn = tournamentEngine.get(tournId);
+    if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
+    if (tourn.status !== 'registering' && tourn.status !== 'scheduled')
+      return socket.emit('error', { message: 'Cannot unregister after tournament start' });
+
+    const buyIn = Number(tourn.buyIn) || 0;
+    const result = tournamentEngine.unregister(tournId, socket.id, socket.userId);
+    if (!result.ok) return socket.emit('error', { message: result.error });
+
+    if (buyIn > 0 && socket.userId) {
+      try {
+        if (getPool()) {
+          await withTransaction(async (client) => {
+            await updateChips(socket.userId, buyIn, 0, client);
+            await client.query(
+              `UPDATE tournament_entries SET status='refunded', updated_at=now()
+               WHERE tourn_id=$1 AND user_id=$2 AND status='active'`,
+              [tournId, socket.userId]);
+            await client.query(
+              `UPDATE tournaments SET registered=$1, updated_at=now() WHERE id=$2`,
+              [tourn.registeredPlayers.length, tournId]);
+          });
+        } else {
+          await updateChips(socket.userId, buyIn, 0);
+        }
+        socket.chips = (socket.chips || 0) + buyIn;
+      } catch(e) {
+        console.error(`[TournUnregister] refund failed for ${tournId}:`, e.message);
+      }
+    }
+
     socket.leave('tourn_' + tournId);
+    socket.emit('tournUnregistered', { tournId, balance: socket.chips });
     io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
     io.to('admin').emit('tournState', tournamentEngine.getState(tournId));
   });
@@ -908,14 +1000,135 @@ antiCheat.on('alert', (alert) => {
   }
 });
 
+// Move a persistent tournament from 'registering' to 'running': seat players, create tables, notify.
+async function _launchPersistentTournament(tourn) {
+  const startResult = tournamentEngine.start(tourn.id, io);
+  if (!startResult.ok) {
+    console.error(`[TournLaunch] ${tourn.id} start failed:`, startResult.error);
+    return;
+  }
+  const blinds = STD_BLINDS[0];
+  Object.entries(tourn.tables).forEach(([tid, tbl]) => {
+    tableManager.createTable(tid, {
+      name: (tourn.name || 'Tournament') + ' Table',
+      sb: blinds[0], bb: blinds[1],
+      maxSeats: tbl.seats.length,
+      isTournament: true,
+    });
+    tbl.seats.forEach(p => {
+      if (p.socketId) tableManager.joinTable(tid, p.socketId, p.name, p.chips);
+    });
+  });
+  tourn.registeredPlayers.forEach(p => {
+    if (!p.socketId || !p.tableId) return;
+    const pSocket = io.sockets.sockets.get(p.socketId);
+    if (!pSocket) return;
+    pSocket.join(p.tableId);
+    pSocket.emit('tournStarted', {
+      tournId: tourn.id,
+      tableId: p.tableId,
+      state: { blinds: { sb: blinds[0], bb: blinds[1] } },
+    });
+  });
+  await dbQuery(`UPDATE tournaments SET status='running', updated_at=now() WHERE id=$1`, [tourn.id]);
+  Object.keys(tourn.tables).forEach(tid => {
+    tryStartNewHand(tid);
+    tableManager.onAutoFold(tid, (autoTid) => {
+      const s = tableManager.getTableState(autoTid);
+      if (s) io.to(autoTid).emit('tableState', s);
+      if (s?.phase === 'waiting' || s?.phase === 'starting') {
+        setTimeout(() => tryStartNewHand(autoTid), 3500);
+      }
+    });
+  });
+  io.emit('tournState', tournamentEngine.getState(tourn.id));
+  console.log(`[TournLaunch] ${tourn.id} → running with ${tourn.registeredPlayers.length} players`);
+}
+
+// Cancel a tournament that never reached the min-players threshold; refund all active entries.
+async function _cancelAndRefundTournament(tourn, reason) {
+  tournamentEngine.setStatus(tourn.id, 'cancelled');
+  try {
+    await withTransaction(async (client) => {
+      await client.query(`UPDATE tournaments SET status='cancelled', updated_at=now() WHERE id=$1`, [tourn.id]);
+      const entries = (await client.query(
+        `SELECT id, user_id, buy_in FROM tournament_entries WHERE tourn_id=$1 AND status='active'`,
+        [tourn.id])).rows;
+      for (const e of entries) {
+        await updateChips(e.user_id, Number(e.buy_in), 0, client);
+        await client.query(
+          `UPDATE tournament_entries SET status='refunded', updated_at=now() WHERE id=$1`,
+          [e.id]);
+      }
+      console.log(`[TournTick] ${tourn.id} → cancelled (${reason}); refunded ${entries.length} entries`);
+    });
+  } catch (e) {
+    console.error(`[TournTick] ${tourn.id} cancel/refund failed:`, e.message);
+  }
+  tourn.registeredPlayers.forEach(p => {
+    if (!p.socketId) return;
+    const pSocket = io.sockets.sockets.get(p.socketId);
+    if (!pSocket) return;
+    pSocket.emit('tournCancelled', { tournId: tourn.id, reason });
+  });
+}
+
+// Tick: flip statuses based on start_time.
+async function tournamentStatusTick() {
+  if (!getPool()) return;
+  const now = Date.now();
+  for (const tourn of tournamentEngine.getAll()) {
+    if (!tourn.persistent || !tourn.startTime) continue;
+    try {
+      if (tourn.status === 'scheduled' && now >= tourn.startTime - 10 * 60 * 1000) {
+        tournamentEngine.setStatus(tourn.id, 'registering');
+        await dbQuery(`UPDATE tournaments SET status='registering', updated_at=now() WHERE id=$1`, [tourn.id]);
+        io.emit('tournState', tournamentEngine.getState(tourn.id));
+        console.log(`[TournTick] ${tourn.id} → registering`);
+      } else if (tourn.status === 'registering' && now >= tourn.startTime) {
+        if (tourn.registeredPlayers.length < 2) {
+          await _cancelAndRefundTournament(tourn, 'insufficient_registrations');
+        } else {
+          await _launchPersistentTournament(tourn);
+        }
+      }
+    } catch (e) {
+      console.error(`[TournTick] ${tourn.id} tick error:`, e.message);
+    }
+  }
+}
+
+// Hydrate persisted tournaments (scheduled + registering) into the in-memory engine.
+async function hydratePersistentTournaments() {
+  if (!getPool()) return;
+  const rows = await dbQuery(
+    `SELECT * FROM tournaments WHERE status IN ('scheduled','registering') ORDER BY start_time ASC`
+  );
+  for (const row of rows) {
+    tournamentEngine.hydrateFromRow(row);
+  }
+  if (rows.length) console.log(`[Hydrate] Loaded ${rows.length} persistent tournaments.`);
+}
+
 // Single-replica assumption: two instances booting simultaneously could double-refund.
 // Current deployment is 1 replica on Railway.
+// Refunds only entries whose tournament is gone or already running; restores
+// registrations for pre-start tournaments so users don't lose their spot on crash.
 async function recoverOrphanedTournamentEntries() {
   if (!getPool()) return;
   const rows = await dbQuery(
     `SELECT id, tourn_id, user_id, username, buy_in FROM tournament_entries WHERE status='active'`
   );
+  let refunded = 0, restored = 0;
   for (const r of rows) {
+    const tourn = tournamentEngine.get(r.tourn_id);
+    const preStart = tourn && (tourn.status === 'scheduled' || tourn.status === 'registering');
+    if (preStart) {
+      // Tournament survived — restore this player's registration in memory.
+      tournamentEngine.hydrateRegistration(r.tourn_id, r.user_id, r.username || r.user_id);
+      restored++;
+      continue;
+    }
     try {
       await withTransaction(async (client) => {
         await updateChips(r.user_id, Number(r.buy_in), 0, client);
@@ -923,20 +1136,26 @@ async function recoverOrphanedTournamentEntries() {
           `UPDATE tournament_entries SET status='refunded', updated_at=now() WHERE id=$1`,
           [r.id]);
       });
+      refunded++;
       console.log(`[Recovery] Refunded $${r.buy_in} tournament buy-in to ${r.username || r.user_id} (tourn ${r.tourn_id})`);
     } catch (e) {
       console.error(`[Recovery] FAILED refund entry ${r.id}:`, e.message);
     }
   }
-  if (rows.length) console.log(`[Recovery] Processed ${rows.length} orphaned tournament entries.`);
+  if (rows.length) console.log(`[Recovery] Processed ${rows.length} orphaned entries: ${restored} restored, ${refunded} refunded.`);
 }
 
+const { generateUpcomingTournaments } = require('./tournamentScheduler');
 const { initAuth } = require('./auth');
 
 const PORT = process.env.PORT || 3001;
 initAuth().then(async () => {
   await _loadAssetsFromDB();
-  await recoverOrphanedTournamentEntries();
+  await generateUpcomingTournaments();      // create instance rows from templates
+  await hydratePersistentTournaments();      // load pre-start tournaments into memory
+  await recoverOrphanedTournamentEntries();  // refund or restore ledger entries
+  setInterval(() => generateUpcomingTournaments().catch(e => console.error('[TournScheduler]', e.message)), 60 * 60 * 1000);
+  setInterval(() => tournamentStatusTick().catch(e => console.error('[TournTick]', e.message)), 30 * 1000);
   server.listen(PORT, () => console.log(`Royal Flush backend :${PORT}`));
 });
 
