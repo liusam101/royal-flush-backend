@@ -154,36 +154,57 @@ const tableManager = {
   leaveTable(tableId, socketId) {
     const t = tables[tableId];
     if (!t) return;
-    // No waiting list — new tables spawn automatically when full
 
-    // If hand is in progress and only one non-folded player remains after this leave,
-    // award the pot immediately. If 2+ remain, hand continues normally.
+    const leaving = t.seats.find(s => s.socketId === socketId);
+    if (!leaving) return { stack: 0, handResult: null };
+    if (leaving._autoFoldTimer) { clearTimeout(leaving._autoFoldTimer); leaving._autoFoldTimer = null; }
+
+    const returnedStack = leaving.stack || 0;
     const inProgress = t.phase !== 'waiting' && t.phase !== 'starting';
-    let handResult = null;
-    if (inProgress && t.pot > 0) {
-      const remaining = t.seats.filter(s => s.socketId !== socketId && !s.folded);
-      if (remaining.length === 1) {
-        handResult = { winner: remaining[0].name, amount: t.pot, reason: 'opponent left' };
-        remaining[0].stack += t.pot;
-        t.pot = 0;
-        this._resetHand(tableId);
+
+    if (inProgress) {
+      // Keep the seat (and its totalBet) in the pot math until the hand ends.
+      // Mark folded + left; take their remaining stack off the table now.
+      leaving.folded = true;
+      leaving.left = true;
+      leaving.stack = 0;
+      leaving.sitOut = true;
+      if (leaving._autoFoldTimer) { clearTimeout(leaving._autoFoldTimer); leaving._autoFoldTimer = null; }
+
+      // If only one non-folded player now remains, award the pot immediately.
+      const remaining = t.seats.filter(s => !s.folded);
+      let handResult = null;
+      if (remaining.length === 1 && t.pot > 0) {
+        let foldRake = 0;
+        if (!t.isTournament && t.pot >= 1) {
+          foldRake = Math.min(Math.round(t.pot * 0.025 * 100) / 100, 3.00);
+          t._rakeCollected = (t._rakeCollected || 0) + foldRake;
+        }
+        remaining[0].stack += (t.pot - foldRake);
+        handResult = { winner: remaining[0].name, amount: t.pot - foldRake, rake: foldRake, reason: 'opponent left' };
+        this._resetHand(tableId);   // _resetHand will physically drop the left seat
+      } else if (t.actIdx >= 0 && t.seats[t.actIdx] === leaving) {
+        // It was the leaver's turn — advance action to the next eligible player.
+        this._nextActor(tableId);
+        // leaving is not an "action", so check if betting is now done:
+        if (this._bettingDone(tableId)) {
+          const over = this._advancePhase(tableId);
+          if (over) { handResult = over; this._resetHand(tableId); }
+        }
       }
+      return { stack: returnedStack, handResult };
     }
 
-    // Clear any auto-fold timers for the leaving player
-    const leaving = t.seats.find(s => s.socketId === socketId);
-    if (leaving?._autoFoldTimer) { clearTimeout(leaving._autoFoldTimer); }
-    const returnedStack = leaving?.stack || 0;
-
+    // Not in a hand — safe to remove the seat immediately.
     t.seats = t.seats.filter(s => s.socketId !== socketId);
     t.seats.forEach((s, i) => { s.seat = i; });
     if (t.seats.length < 2) {
       t.phase = 'waiting'; t.pot = 0; t.board = []; t.sidePots = [];
-      t.seats.forEach(s => { s.bet = 0; s.totalBet = 0; s.folded = false; s.cards = []; });
+      t.seats.forEach(s => { s.bet = 0; s.totalBet = 0; s.folded = false; s.cards = []; s.acted = false; });
     }
     if (t.actIdx    >= t.seats.length) t.actIdx    = 0;
     if (t.dealerIdx >= t.seats.length) t.dealerIdx = 0;
-    return { stack: returnedStack, handResult };
+    return { stack: returnedStack, handResult: null };
   },
 
   removePlayer(socketId) {
@@ -519,15 +540,21 @@ const tableManager = {
 
   _resetHand(tableId) {
     const t = tables[tableId];
+    if (t.seats.some(s => s.left)) {
+      t.seats = t.seats.filter(s => !s.left);
+      t.seats.forEach((s, i) => { s.seat = i; });
+      if (t.dealerIdx >= t.seats.length) t.dealerIdx = 0;
+      if (t.actIdx    >= t.seats.length) t.actIdx    = 0;
+    }
     t.pot = 0; t.board = []; t.sidePots = []; t.phase = 'starting'; t.actIdx = 0;
     t.lastRaiseSize = 0;
     t.seats.forEach(s => {
       s.bet = 0; s.totalBet = 0; s.folded = false; s.cards = []; s.acted = false;
       if (s._autoFoldTimer) { clearTimeout(s._autoFoldTimer); s._autoFoldTimer = null; }
-      // Players who joined mid-hand are now ready to play
       if (s.pendingActive) { s.sitOut = false; s.pendingActive = false; }
     });
-    t.dealerIdx = (t.dealerIdx + 1) % t.seats.length;
+    if (t.seats.length < 2) t.phase = 'waiting';
+    else t.dealerIdx = (t.dealerIdx + 1) % t.seats.length;
   },
 };
 
