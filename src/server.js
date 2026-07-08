@@ -129,7 +129,7 @@ function tryStartNewHand(tableId) {
 // Never debit cash-table buy-ins from the DB at join time.
 // Settles all authenticated players' chip deltas for one finished hand ATOMICALLY,
 // then applies in-memory/side effects only after the DB commit succeeds.
-// statsMode: 'showdown' (playerAction), 'leave' (leaveTable), 'fold' (disconnect/autofold)
+// statsMode: 'showdown' (playerAction), 'fold' (hand-ending leave / disconnect / autofold)
 async function settleHandChips(tableId, hr, statsMode) {
   const finalState = tableManager.getTableState(tableId);
   if (!finalState?.seats) return;
@@ -164,13 +164,13 @@ async function settleHandChips(tableId, hr, statsMode) {
   for (const e of entries) {
     if (moneyNonZero(e.delta)) e.skt.chips = e.trueNow;
     const isWinner = e.seat.name === hr?.winner;
-    if (!isWinner && e.delta < 0 && statsMode !== 'leave')
+    if (!isWinner && e.delta < 0)
       rg.recordLoss(e.skt.userId, Math.abs(e.delta)).catch(() => {});
     updateStats(e.skt.userId, {
       handPlayed: 1,
       won: isWinner ? 1 : 0,
       amountWon: isWinner ? (hr?.amount || 0) : 0,
-      amountLost: (statsMode !== 'leave' && !isWinner && e.delta < 0) ? Math.abs(e.delta) : 0,
+      amountLost: (!isWinner && e.delta < 0) ? Math.abs(e.delta) : 0,
       showdownWin: isShowdown && isWinner ? 1 : 0,
       showdownPlayed: isShowdown ? 1 : 0,
     }).catch(() => {});
@@ -403,7 +403,7 @@ io.on('connection', async (socket) => {
       const hr = leaveResult.handResult;
       io.to(tableId).emit('handResult', hr);
       handHistory.endHand(tableId, hr);
-      try { await settleHandChips(tableId, hr, 'leave'); }
+      try { await settleHandChips(tableId, hr, 'fold'); }
       catch(e) { console.error(`[Settle] failed for ${tableId}:`, e.message); }
       setTimeout(() => tryStartNewHand(tableId), 3500);
     }
