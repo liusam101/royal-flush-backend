@@ -73,8 +73,13 @@ const tableManager = {
   updateBlinds(tableId, sb, bb) {
     const t = tables[tableId];
     if (!t) return;
-    t.sb = sb; t.bb = bb;
-    t.engine = new GameEngine(sb, bb);
+    const inProgress = t.phase !== 'waiting' && t.phase !== 'starting';
+    if (inProgress) {
+      t.pendingBlinds = { sb, bb };
+    } else {
+      t.sb = sb; t.bb = bb;
+      t.pendingBlinds = null;
+    }
   },
 
   // Remove a table
@@ -448,6 +453,11 @@ const tableManager = {
 
   _startHand(tableId) {
     const t = tables[tableId];
+    if (t.pendingBlinds) {
+      t.sb = t.pendingBlinds.sb;
+      t.bb = t.pendingBlinds.bb;
+      t.pendingBlinds = null;
+    }
     t.engine.newDeck();
     t.board = []; t.pot = 0; t.sidePots = []; t.phase = 'preflop';
     t.lastRaiseSize = t.bb;
