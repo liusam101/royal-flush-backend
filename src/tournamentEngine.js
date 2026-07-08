@@ -88,27 +88,107 @@ const tournamentEngine = {
   getAll() { return Object.values(tournaments); },
   get(id)  { return tournaments[id]; },
 
-  register(tournId, socketId, playerName) {
+  register(tournId, socketId, playerName, userId=null) {
     const t = tournaments[tournId];
     if (!t) return { ok:false, error:'Tournament not found' };
-    if (t.status !== 'registering') return { ok:false, error:'Registration closed' };
+    if (t.status !== 'registering' && t.status !== 'scheduled') return { ok:false, error:'Registration closed' };
     if (t.registeredPlayers.length >= t.maxPlayers) return { ok:false, error:'Tournament full' };
-    if (t.registeredPlayers.find(p=>p.socketId===socketId)) return { ok:false, error:'Already registered' };
-    t.registeredPlayers.push({ socketId, name:playerName, chips:t.startingStack, tableId:null, seatIdx:null, eliminated:false, place:null, prize:0 });
+    const isDup = userId
+      ? t.registeredPlayers.find(p=>p.userId===userId)
+      : t.registeredPlayers.find(p=>p.socketId===socketId);
+    if (isDup) return { ok:false, error:'Already registered' };
+    t.registeredPlayers.push({ userId, socketId, name:playerName, chips:t.startingStack, tableId:null, seatIdx:null, eliminated:false, place:null, prize:0 });
     t.prizePool = Math.floor(t.registeredPlayers.length * t.buyIn * 0.95 * 100) / 100; // 5% rake
     if (t.prizePool < t.guarantee) t.prizePool = t.guarantee;
     t.prizes = getPrizeStructure(t.registeredPlayers.length, t.prizePool, t.isSNG||false);
     return { ok:true, registered:t.registeredPlayers.length };
   },
 
-  unregister(tournId, socketId) {
+  unregister(tournId, socketId, userId=null) {
     const t = tournaments[tournId];
-    if (!t || t.status !== 'registering') return { ok:false, error:'Cannot unregister' };
-    t.registeredPlayers = t.registeredPlayers.filter(p=>p.socketId!==socketId);
+    if (!t) return { ok:false, error:'Tournament not found' };
+    if (t.status !== 'registering' && t.status !== 'scheduled') return { ok:false, error:'Cannot unregister' };
+    t.registeredPlayers = userId
+      ? t.registeredPlayers.filter(p=>p.userId!==userId)
+      : t.registeredPlayers.filter(p=>p.socketId!==socketId);
     t.prizePool = Math.floor(t.registeredPlayers.length * t.buyIn * 0.95 * 100) / 100;
     if (t.prizePool < t.guarantee) t.prizePool = t.guarantee;
     t.prizes = getPrizeStructure(t.registeredPlayers.length, t.prizePool, t.isSNG||false);
     return { ok:true };
+  },
+
+  // Update a registered player's socketId (e.g. on reconnect).
+  updateSocketId(tournId, userId, newSocketId) {
+    const t = tournaments[tournId];
+    if (!t) return null;
+    const p = t.registeredPlayers.find(pl => pl.userId === userId);
+    if (!p) return null;
+    p.socketId = newSocketId;
+    return p;
+  },
+
+  // Persist an existing DB-backed tournament instance into memory.
+  // row: a row from the `tournaments` table.
+  hydrateFromRow(row) {
+    const id = row.id;
+    if (tournaments[id]) return tournaments[id];
+    const rawPrize = row.prize_structure;
+    const prizePcts = Array.isArray(rawPrize)
+      ? rawPrize
+      : (typeof rawPrize === 'string' ? JSON.parse(rawPrize) : []);
+    tournaments[id] = {
+      id,
+      templateId: row.template_id || null,
+      name: row.name,
+      buyIn: Number(row.buy_in),
+      startingStack: row.starting_stack,
+      blindMins: row.blind_mins,
+      maxPlayers: row.max_players,
+      guarantee: Number(row.guarantee || 0),
+      status: row.status,                  // 'scheduled' | 'registering' | 'running' | 'finished' | 'cancelled'
+      registeredPlayers: [],
+      tables: {},
+      blindLevel: 0,
+      handCount: 0,
+      startTime: row.start_time ? new Date(row.start_time).getTime() : null,
+      blindTimer: null,
+      prizePool: 0,
+      prizes: [],
+      prizePcts,                            // frozen percentages from template
+      results: [],
+      adminCreated: false,
+      persistent: true,
+      createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+    };
+    return tournaments[id];
+  },
+
+  // Restore a registration from the DB ledger (bypasses status check).
+  hydrateRegistration(tournId, userId, playerName) {
+    const t = tournaments[tournId];
+    if (!t) return { ok:false, error:'Tournament not found' };
+    if (t.registeredPlayers.find(p=>p.userId===userId)) return { ok:true }; // idempotent
+    t.registeredPlayers.push({ userId, socketId: null, name:playerName, chips:t.startingStack, tableId:null, seatIdx:null, eliminated:false, place:null, prize:0 });
+    t.prizePool = Math.floor(t.registeredPlayers.length * t.buyIn * 0.95 * 100) / 100;
+    if (t.prizePool < t.guarantee) t.prizePool = t.guarantee;
+    // Prefer the frozen template percentages if present; fall back to field-size defaults.
+    if (t.prizePcts?.length) {
+      t.prizes = t.prizePcts.map((pct, i) => ({
+        place: i + 1, pct,
+        amount: Math.floor(t.prizePool * pct / 100 * 100) / 100,
+      }));
+    } else {
+      t.prizes = getPrizeStructure(t.registeredPlayers.length, t.prizePool, t.isSNG||false);
+    }
+    return { ok:true };
+  },
+
+  // Change a tournament's status without other side-effects. Server layer persists.
+  setStatus(tournId, newStatus) {
+    const t = tournaments[tournId];
+    if (!t) return false;
+    t.status = newStatus;
+    return true;
   },
 
   start(tournId, io, onTableState) {
