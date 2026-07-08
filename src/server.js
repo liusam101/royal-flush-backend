@@ -106,8 +106,14 @@ app.get('/api/assets', (req, res) => {
 });
 
 // List upcoming, registering, and running tournaments for the lobby.
-app.get('/api/tournaments', (req, res) => {
+// If an auth token is provided, iAmRegistered is populated per tournament.
+app.get('/api/tournaments', async (req, res) => {
   const now = Date.now();
+  let userId = null;
+  const auth = req.headers.authorization;
+  if (auth?.startsWith('Bearer ')) {
+    try { userId = (await verifyTokenAsync(auth.slice(7)))?.userId || null; } catch(_) {}
+  }
   const list = tournamentEngine.getAll()
     .filter(t => t.persistent && (t.status === 'scheduled' || t.status === 'registering' || t.status === 'running'))
     .sort((a, b) => (a.startTime || 0) - (b.startTime || 0))
@@ -127,6 +133,7 @@ app.get('/api/tournaments', (req, res) => {
         startTime: t.startTime,
         msUntilStart: t.startTime ? t.startTime - now : null,
         status: t.status,
+        iAmRegistered: userId ? t.registeredPlayers.some(p => p.userId === userId) : false,
       };
     });
   res.json({ ok: true, tournaments: list });
