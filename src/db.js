@@ -151,6 +151,44 @@ async function initDB() {
         updated_at TIMESTAMPTZ DEFAULT now()
       );
       CREATE INDEX IF NOT EXISTS idx_tournament_entries_status ON tournament_entries(status);
+
+      CREATE TABLE IF NOT EXISTS tournament_templates (
+        id                  TEXT PRIMARY KEY,
+        name                TEXT NOT NULL,
+        buy_in              NUMERIC(12,2) NOT NULL,
+        starting_stack      INT NOT NULL DEFAULT 5000,
+        blind_mins          INT NOT NULL DEFAULT 10,
+        max_players         INT NOT NULL DEFAULT 100,
+        guarantee           NUMERIC(12,2) NOT NULL DEFAULT 0,
+        prize_structure     JSONB NOT NULL,
+        recurrence_type     TEXT NOT NULL DEFAULT 'once',
+        recurrence_interval INT,
+        recurrence_time     TEXT,
+        enabled             BOOLEAN NOT NULL DEFAULT true,
+        created_at          TIMESTAMPTZ DEFAULT now(),
+        updated_at          TIMESTAMPTZ DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS tournaments (
+        id              TEXT PRIMARY KEY,
+        template_id     TEXT REFERENCES tournament_templates(id) ON DELETE SET NULL,
+        name            TEXT NOT NULL,
+        buy_in          NUMERIC(12,2) NOT NULL,
+        starting_stack  INT NOT NULL,
+        blind_mins      INT NOT NULL,
+        max_players     INT NOT NULL,
+        guarantee       NUMERIC(12,2) NOT NULL DEFAULT 0,
+        prize_structure JSONB NOT NULL,
+        start_time      TIMESTAMPTZ NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'scheduled',
+        registered      INT NOT NULL DEFAULT 0,
+        created_at      TIMESTAMPTZ DEFAULT now(),
+        updated_at      TIMESTAMPTZ DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_tournaments_status ON tournaments(status);
+      CREATE INDEX IF NOT EXISTS idx_tournaments_start_time ON tournaments(start_time);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_tournaments_template_start
+        ON tournaments(template_id, start_time) WHERE template_id IS NOT NULL;
     `);
     console.log('[DB] Tables ready');
     return true;
