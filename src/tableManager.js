@@ -188,7 +188,11 @@ const tableManager = {
           t._rakeCollected = (t._rakeCollected || 0) + foldRake;
         }
         remaining[0].stack += (t.pot - foldRake);
-        handResult = { winner: remaining[0].name, amount: t.pot - foldRake, rake: foldRake, reason: 'opponent left' };
+        // Rabbit hunt: deal what the rest of the board would have been (deck state is fresh anyway on next hand).
+        const rabbitBoard = [];
+        const need = 5 - (t.board?.length || 0);
+        for (let i = 0; i < need; i++) rabbitBoard.push(t.engine.dealOne());
+        handResult = { winner: remaining[0].name, amount: t.pot - foldRake, rake: foldRake, reason: 'opponent left', rabbitBoard };
         this._resetHand(tableId);   // _resetHand will physically drop the left seat
       } else if (t.actIdx >= 0 && t.seats[t.actIdx] === leaving) {
         // It was the leaver's turn — advance action to the next eligible player.
@@ -334,7 +338,11 @@ const tableManager = {
         t._rakeCollected = (t._rakeCollected || 0) + foldRake;
       }
       active[0].stack += (t.pot - foldRake);
-      const handResult = { winner: active[0].name, amount: t.pot - foldRake, rake: foldRake, reason: 'others folded' };
+      // Rabbit hunt: capture the would-be remaining board for the client's optional reveal.
+      const rabbitBoard = [];
+      const need = 5 - (t.board?.length || 0);
+      for (let i = 0; i < need; i++) rabbitBoard.push(t.engine.dealOne());
+      const handResult = { winner: active[0].name, amount: t.pot - foldRake, rake: foldRake, reason: 'others folded', rabbitBoard };
       this._resetHand(tableId);
       return { ok: true, handOver: true, handResult };
     }
