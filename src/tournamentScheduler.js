@@ -4,7 +4,7 @@
 // ══════════════════════════════════════════════════════════════════════════
 const { getPool, query: dbQuery, withTransaction } = require('./db');
 
-const GENERATE_HORIZON_MS = 48 * 60 * 60 * 1000; // generate instances 48h ahead
+const GENERATE_HORIZON_MS = 8 * 24 * 60 * 60 * 1000; // 8 days ahead (covers weekly tournaments)
 
 // ── Recurrence expansion ───────────────────────────────────────────────────
 // Given a template + a window [now, now+horizon], return the start times (Date[])
