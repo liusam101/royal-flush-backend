@@ -128,6 +128,34 @@ const tournamentEngine = {
     return { ok:true, registered:t.registeredPlayers.length };
   },
 
+  // Re-entry: a busted player buys back in during the late-reg window. Resets their entry
+  // to a fresh starting stack. Increments reentryCount. Returns { ok:true, late:true } on
+  // success so the server layer can seat them at the smallest table.
+  reenterPlayer(tournId, socketId, playerName, userId=null) {
+    const t = tournaments[tournId];
+    if (!t) return { ok:false, error:'Tournament not found' };
+    if (t.status !== 'running') return { ok:false, error:'Re-entry only during running tournament' };
+    const player = userId
+      ? t.registeredPlayers.find(p => p.userId === userId)
+      : t.registeredPlayers.find(p => p.socketId === socketId);
+    if (!player) return { ok:false, error:'Original entry not found' };
+    if (!player.eliminated) return { ok:false, error:'You have not busted yet' };
+    const allowed = t.reentriesAllowed ?? 0;
+    if (allowed <= 0) return { ok:false, error:'Re-entry not allowed for this tournament' };
+    player.reentryCount = (player.reentryCount || 0) + 1;
+    if (player.reentryCount > allowed) return { ok:false, error:'Max re-entries reached' };
+    // Restore player state to fresh.
+    player.eliminated = false;
+    player.place = null;
+    player.prize = 0;
+    player.chips = t.startingStack;
+    player.tableId = null;
+    player.seatIdx = null;
+    player.socketId = socketId;
+    _recomputePrizes(t);
+    return { ok:true, late:true, reentryCount: player.reentryCount };
+  },
+
   // Register a player AFTER the tournament has started (late reg window). Same shape as
   // register() but allows status='running' and does NOT re-seat the whole field.
   // The server layer must then seat this player at a specific table (smallest by default).
@@ -185,6 +213,7 @@ const tournamentEngine = {
       maxPlayers: row.max_players,
       guarantee: Number(row.guarantee || 0),
       lateRegMins: row.late_reg_mins ?? 60,
+      reentriesAllowed: row.reentries_allowed ?? 0,
       status: row.status,                  // 'scheduled' | 'registering' | 'running' | 'finished' | 'cancelled'
       registeredPlayers: [],
       tables: {},
@@ -431,9 +460,9 @@ const tournamentEngine = {
     clearInterval(t.blindTimer);
     t.blindTimer = setInterval(() => {
       if (t.status !== 'running') return;
+      if (t.onBreakUntil && Date.now() < t.onBreakUntil) return; // paused during break
       t.blindLevel = Math.min(t.blindLevel + 1, STD_BLINDS.length - 1);
       const [sb, bb] = STD_BLINDS[t.blindLevel];
-      // Update both the internal engine and the actual tableManager tables
       Object.keys(t.tables).forEach(tid => {
         tableManager.updateBlinds(tid, sb, bb);
       });
@@ -446,7 +475,81 @@ const tournamentEngine = {
         });
         this._broadcastTournState(t, io);
       }
+      // Trigger a break every N blind levels (default: every 6 levels = ~60 min at 10-min levels).
+      const breakEvery = t.breakEveryLevels || 6;
+      const breakMs = (t.breakMins || 5) * 60 * 1000;
+      if (t.blindLevel > 0 && t.blindLevel % breakEvery === 0 && !t.onBreakUntil) {
+        this.startBreak(t.id, breakMs, io);
+      }
     }, t.blindMins * 60 * 1000);
+  },
+
+  // Start a scheduled break: block new hands until onBreakUntil timestamp.
+  // Auto-resumes after breakMs; blind timer keeps ticking but level advance is skipped.
+  startBreak(tournId, breakMs, io) {
+    const t = tournaments[tournId];
+    if (!t || t.status !== 'running') return;
+    t.onBreakUntil = Date.now() + breakMs;
+    if (io) {
+      io.emit('tournBreak', {
+        tournId: t.id,
+        breakUntil: t.onBreakUntil,
+        breakMins: Math.round(breakMs / 60000),
+      });
+    }
+    console.log(`[TournBreak] ${t.id} on break for ${Math.round(breakMs/60000)} min`);
+    setTimeout(() => {
+      const cur = tournaments[tournId];
+      if (!cur) return;
+      cur.onBreakUntil = null;
+      if (io) io.emit('tournResume', { tournId: cur.id });
+      console.log(`[TournBreak] ${cur.id} resumed`);
+    }, breakMs);
+  },
+
+  isOnBreak(tournId) {
+    const t = tournaments[tournId];
+    return !!(t?.onBreakUntil && Date.now() < t.onBreakUntil);
+  },
+
+  // ── Bubble hand-for-hand (Phase 2B) ─────────────────────────────────
+  // Bubble = one more elimination and everyone remaining is in the money.
+  isOnBubble(tournId) {
+    const t = tournaments[tournId];
+    if (!t) return false;
+    const paidSpots = (t.prizes || []).filter(p => p.pct > 0).length;
+    if (paidSpots < 2) return false; // no bubble in HU tournaments
+    const remaining = this._totalRemaining(t);
+    return remaining === paidSpots + 1;
+  },
+
+  // Called by server when a table finishes a hand. Marks the table 'ready to start' next hand.
+  // Returns true if this call should block (waiting on other tables), false if we should start.
+  markTableReadyDuringBubble(tournId, tableId) {
+    const t = tournaments[tournId];
+    if (!t) return false;
+    t._bubbleReady = t._bubbleReady || {};
+    t._bubbleReady[tableId] = true;
+    return true; // caller should wait; server checks all-ready separately
+  },
+
+  // Returns true if this table must currently wait (bubble mode + not all tables ready yet).
+  isBubbleWaiting(tournId, tableId) {
+    const t = tournaments[tournId];
+    if (!t || !this.isOnBubble(tournId)) return false;
+    // Wait if not all tables have reported ready.
+    const readyMap = t._bubbleReady || {};
+    const activeTids = Object.keys(t.tables);
+    for (const tid of activeTids) {
+      if (!readyMap[tid]) return true;
+    }
+    // All ready — clear the map and let the next tryStartNewHand proceed.
+    return false;
+  },
+
+  clearBubbleReady(tournId) {
+    const t = tournaments[tournId];
+    if (t) t._bubbleReady = {};
   },
 
   eliminatePlayer(tournId, socketId) {
@@ -493,6 +596,23 @@ const tournamentEngine = {
     const t = tournaments[tournId];
     if (!t) return null;
     const remaining = t.registeredPlayers.filter(p=>!p.eliminated).length;
+    // Live leaderboard: top-10 chip leaders across all tables. Source of truth is tableManager.
+    let leaderboard = [];
+    let avgStack = 0;
+    if (t.status === 'running' && t.tables && Object.keys(t.tables).length) {
+      try {
+        const { tableManager } = require('./tableManager');
+        const allSeats = [];
+        Object.keys(t.tables).forEach(tid => {
+          const s = tableManager.getTableState(tid);
+          if (!s?.seats) return;
+          s.seats.forEach(seat => allSeats.push({ name: seat.name, chips: seat.stack, tableId: tid }));
+        });
+        allSeats.sort((a, b) => b.chips - a.chips);
+        leaderboard = allSeats.slice(0, 10);
+        if (allSeats.length) avgStack = Math.round(allSeats.reduce((sum, s) => sum + s.chips, 0) / allSeats.length);
+      } catch(_) { /* tableManager not yet loaded */ }
+    }
     return {
       id: t.id, name: t.name, status: t.status,
       buyIn: t.buyIn, startingStack: t.startingStack,
@@ -503,6 +623,12 @@ const tournamentEngine = {
       remaining, eliminated: t.registeredPlayers.length - remaining,
       prizePool: t.prizePool, prizes: t.prizes,
       guarantee: t.guarantee,
+      lateRegMins: t.lateRegMins,
+      reentriesAllowed: t.reentriesAllowed,
+      onBreakUntil: t.onBreakUntil || null,
+      onBubble: this.isOnBubble(tournId),
+      leaderboard,
+      avgStack,
       results: t.results,
       tables: Object.keys(t.tables).length,
       startTime: t.startTime,
