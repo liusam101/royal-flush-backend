@@ -157,6 +157,101 @@ app.get('/api/tournaments', async (req, res) => {
   res.json({ ok: true, tournaments: list });
 });
 
+// ══ Admin tournament REST endpoints ═══════════════════════════════════════
+function _requireAdmin(req, res, next) {
+  const secret = req.headers['x-admin-secret'] || req.query.secret;
+  if (secret !== ADMIN_SECRET) return res.status(401).json({ ok:false, error: 'Unauthorized' });
+  next();
+}
+
+// List all tournament templates.
+app.get('/api/admin/templates', _requireAdmin, async (req, res) => {
+  if (!getPool()) return res.json({ ok:true, templates: [] });
+  try {
+    const rows = await dbQuery(`SELECT * FROM tournament_templates ORDER BY id`);
+    res.json({ ok:true, templates: rows });
+  } catch(e) { res.status(500).json({ ok:false, error: e.message }); }
+});
+
+// Create a template.
+app.post('/api/admin/templates', _requireAdmin, async (req, res) => {
+  if (!getPool()) return res.status(503).json({ ok:false, error:'DB unavailable' });
+  const t = req.body || {};
+  if (!t.id || !t.name || t.buy_in == null) return res.status(400).json({ ok:false, error:'id, name, buy_in required' });
+  try {
+    await dbQuery(
+      `INSERT INTO tournament_templates
+         (id, name, buy_in, starting_stack, blind_mins, max_players, guarantee,
+          prize_structure, recurrence_type, recurrence_interval, recurrence_time,
+          late_reg_mins, reentries_allowed, enabled)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14)`,
+      [t.id, t.name, t.buy_in, t.starting_stack ?? 5000, t.blind_mins ?? 10,
+       t.max_players ?? 100, t.guarantee ?? 0,
+       JSON.stringify(t.prize_structure ?? [65,35]), t.recurrence_type ?? 'once',
+       t.recurrence_interval ?? null, t.recurrence_time ?? null,
+       t.late_reg_mins ?? 60, t.reentries_allowed ?? 0, t.enabled ?? true]);
+    res.json({ ok:true, id: t.id });
+  } catch(e) { res.status(500).json({ ok:false, error: e.message }); }
+});
+
+// Update a template.
+app.put('/api/admin/templates/:id', _requireAdmin, async (req, res) => {
+  if (!getPool()) return res.status(503).json({ ok:false, error:'DB unavailable' });
+  const t = req.body || {};
+  const id = req.params.id;
+  try {
+    await dbQuery(
+      `UPDATE tournament_templates
+         SET name=$1, buy_in=$2, starting_stack=$3, blind_mins=$4, max_players=$5,
+             guarantee=$6, prize_structure=$7::jsonb, recurrence_type=$8,
+             recurrence_interval=$9, recurrence_time=$10, late_reg_mins=$11,
+             reentries_allowed=$12, enabled=$13, updated_at=now()
+       WHERE id=$14`,
+      [t.name, t.buy_in, t.starting_stack ?? 5000, t.blind_mins ?? 10,
+       t.max_players ?? 100, t.guarantee ?? 0,
+       JSON.stringify(t.prize_structure ?? [65,35]), t.recurrence_type ?? 'once',
+       t.recurrence_interval ?? null, t.recurrence_time ?? null,
+       t.late_reg_mins ?? 60, t.reentries_allowed ?? 0, t.enabled ?? true, id]);
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ ok:false, error: e.message }); }
+});
+
+// Delete a template (leaves already-generated instances alone).
+app.delete('/api/admin/templates/:id', _requireAdmin, async (req, res) => {
+  if (!getPool()) return res.status(503).json({ ok:false, error:'DB unavailable' });
+  try {
+    await dbQuery(`DELETE FROM tournament_templates WHERE id=$1`, [req.params.id]);
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ ok:false, error: e.message }); }
+});
+
+// List all tournaments (all statuses), for the admin dashboard.
+app.get('/api/admin/tournaments', _requireAdmin, (req, res) => {
+  const now = Date.now();
+  const list = tournamentEngine.getAll()
+    .filter(t => t.persistent)
+    .sort((a, b) => (a.startTime || 0) - (b.startTime || 0))
+    .map(t => ({
+      id: t.id,
+      templateId: t.templateId,
+      name: t.name,
+      status: t.status,
+      buyIn: t.buyIn,
+      startingStack: t.startingStack,
+      maxPlayers: t.maxPlayers,
+      lateRegMins: t.lateRegMins,
+      reentriesAllowed: t.reentriesAllowed,
+      registered: t.registeredPlayers.length,
+      humansRegistered: t.registeredPlayers.filter(p => !p.isBot).length,
+      botsRegistered: t.registeredPlayers.filter(p => p.isBot).length,
+      startTime: t.startTime,
+      msUntilStart: t.startTime ? t.startTime - now : null,
+      prizePool: t.prizePool,
+      onBreakUntil: t.onBreakUntil || null,
+    }));
+  res.json({ ok:true, tournaments: list });
+});
+
 // ── Helpers ──────────────────────────────────────────────────────
 function dealCardsToAll(tableId) {
   const cards = tableManager.getPlayerCards(tableId);
@@ -856,7 +951,7 @@ io.on('connection', async (socket) => {
             pSocket.emit('sngTableReady', {
               tournId: tourn.id,
               tableId: p.tableId,
-              state: { blinds: { sb: blinds[0], bb: blinds[1] } },
+              state: { blinds: { sb: blinds[0], bb: blinds[1], ante: blinds[2] || 0 } },
             });
           });
           // Start first hand and register auto-fold for each table
@@ -1243,11 +1338,11 @@ async function _launchPersistentTournament(tourn) {
     console.error(`[TournLaunch] ${tourn.id} start failed:`, startResult.error);
     return;
   }
-  const blinds = STD_BLINDS[0];
+  const blinds = STD_BLINDS[tourn.blindLevel || 0];
   Object.entries(tourn.tables).forEach(([tid, tbl]) => {
     tableManager.createTable(tid, {
       name: (tourn.name || 'Tournament') + ' Table',
-      sb: blinds[0], bb: blinds[1],
+      sb: blinds[0], bb: blinds[1], ante: blinds[2] || 0,
       maxSeats: tbl.seats.length,
       isTournament: true,
     });
@@ -1265,7 +1360,7 @@ async function _launchPersistentTournament(tourn) {
     pSocket.emit('tournStarted', {
       tournId: tourn.id,
       tableId: p.tableId,
-      state: { blinds: { sb: blinds[0], bb: blinds[1] } },
+      state: { blinds: { sb: blinds[0], bb: blinds[1], ante: blinds[2] || 0 } },
     });
   });
   await dbQuery(`UPDATE tournaments SET status='running', updated_at=now() WHERE id=$1`, [tourn.id]);
