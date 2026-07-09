@@ -659,6 +659,10 @@ io.on('connection', async (socket) => {
             await client.query(
               `UPDATE tournaments SET registered=$1, updated_at=now() WHERE id=$2`,
               [tourn.registeredPlayers.length, tournId]);
+            // MTT stats: count this entry
+            await client.query(
+              `UPDATE users SET mtt_played = mtt_played + 1, mtt_total_bought = mtt_total_bought + $1 WHERE id=$2`,
+              [buyIn, socket.userId]);
           });
         } else {
           await updateChips(socket.userId, -buyIn, 0);
@@ -1435,6 +1439,15 @@ async function _processTournHandOver(tableId, tournId, result) {
                 `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
                  WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
                 [elim.prize, tournId, elimSkt.userId]);
+              // MTT stats: finish position, prize, ITM tracking
+              await client.query(
+                `UPDATE users SET
+                   mtt_best_finish  = LEAST(COALESCE(mtt_best_finish, 999999), $1),
+                   mtt_biggest_cash = GREATEST(mtt_biggest_cash, $2),
+                   mtt_total_won    = mtt_total_won + $2,
+                   mtt_itm_count    = mtt_itm_count + CASE WHEN $2 > 0 THEN 1 ELSE 0 END
+                 WHERE id=$3`,
+                [elim.place, elim.prize || 0, elimSkt.userId]);
             });
           } else if (elim.prize > 0) {
             await updateChips(elimSkt.userId, elim.prize, 0);
@@ -1466,6 +1479,16 @@ async function _processTournHandOver(tableId, tournId, result) {
               `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
                WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
               [wPrize, tournId, wSkt.userId]);
+            // MTT stats: 1st place — record win + ITM
+            await client.query(
+              `UPDATE users SET
+                 mtt_best_finish  = LEAST(COALESCE(mtt_best_finish, 999999), 1),
+                 mtt_biggest_cash = GREATEST(mtt_biggest_cash, $1),
+                 mtt_total_won    = mtt_total_won + $1,
+                 mtt_itm_count    = mtt_itm_count + CASE WHEN $1 > 0 THEN 1 ELSE 0 END,
+                 mtt_wins         = mtt_wins + 1
+               WHERE id=$2`,
+              [wPrize || 0, wSkt.userId]);
           });
         } else if (wPrize > 0) {
           await updateChips(wSkt.userId, wPrize, 0);
