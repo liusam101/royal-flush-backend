@@ -170,6 +170,7 @@ async function initDB() {
         updated_at          TIMESTAMPTZ DEFAULT now()
       );
       ALTER TABLE tournament_templates ADD COLUMN IF NOT EXISTS late_reg_mins INT NOT NULL DEFAULT 60;
+      ALTER TABLE tournament_templates ADD COLUMN IF NOT EXISTS reentries_allowed INT NOT NULL DEFAULT 0;
 
       CREATE TABLE IF NOT EXISTS tournaments (
         id              TEXT PRIMARY KEY,
@@ -189,6 +190,7 @@ async function initDB() {
         updated_at      TIMESTAMPTZ DEFAULT now()
       );
       ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS late_reg_mins INT NOT NULL DEFAULT 60;
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS reentries_allowed INT NOT NULL DEFAULT 0;
       CREATE INDEX IF NOT EXISTS idx_tournaments_status ON tournaments(status);
       CREATE INDEX IF NOT EXISTS idx_tournaments_start_time ON tournaments(start_time);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_tournaments_template_start
