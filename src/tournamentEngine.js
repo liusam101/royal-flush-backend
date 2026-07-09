@@ -63,6 +63,22 @@ const STD_BLINDS = [
   [2000,4000],[3000,6000],[5000,10000],[10000,20000],
 ];
 
+// Recompute prize pool and prize breakdown for a tournament. Excludes bots since they
+// don't put in a real buy-in. Prefers frozen template percentages when present.
+function _recomputePrizes(t) {
+  const humanCount = t.registeredPlayers.filter(p => !p.isBot).length;
+  t.prizePool = Math.floor(humanCount * t.buyIn * 0.95 * 100) / 100; // 5% rake
+  if (t.prizePool < t.guarantee) t.prizePool = t.guarantee;
+  if (t.prizePcts?.length) {
+    t.prizes = t.prizePcts.map((pct, i) => ({
+      place: i + 1, pct,
+      amount: Math.floor(t.prizePool * pct / 100 * 100) / 100,
+    }));
+  } else {
+    t.prizes = getPrizeStructure(t.registeredPlayers.length, t.prizePool, t.isSNG||false);
+  }
+}
+
 const tournamentEngine = {
 
   createTournament({ name, buyIn, startingStack=5000, blindMins=10, maxPlayers=100, guarantee=0, adminCreated=true }) {
@@ -98,9 +114,7 @@ const tournamentEngine = {
       : t.registeredPlayers.find(p=>p.socketId===socketId);
     if (isDup) return { ok:false, error:'Already registered' };
     t.registeredPlayers.push({ userId, socketId, name:playerName, chips:t.startingStack, tableId:null, seatIdx:null, eliminated:false, place:null, prize:0 });
-    t.prizePool = Math.floor(t.registeredPlayers.length * t.buyIn * 0.95 * 100) / 100; // 5% rake
-    if (t.prizePool < t.guarantee) t.prizePool = t.guarantee;
-    t.prizes = getPrizeStructure(t.registeredPlayers.length, t.prizePool, t.isSNG||false);
+    _recomputePrizes(t);
     return { ok:true, registered:t.registeredPlayers.length };
   },
 
@@ -111,9 +125,7 @@ const tournamentEngine = {
     t.registeredPlayers = userId
       ? t.registeredPlayers.filter(p=>p.userId!==userId)
       : t.registeredPlayers.filter(p=>p.socketId!==socketId);
-    t.prizePool = Math.floor(t.registeredPlayers.length * t.buyIn * 0.95 * 100) / 100;
-    if (t.prizePool < t.guarantee) t.prizePool = t.guarantee;
-    t.prizes = getPrizeStructure(t.registeredPlayers.length, t.prizePool, t.isSNG||false);
+    _recomputePrizes(t);
     return { ok:true };
   },
 
@@ -169,17 +181,7 @@ const tournamentEngine = {
     if (!t) return { ok:false, error:'Tournament not found' };
     if (t.registeredPlayers.find(p=>p.userId===userId)) return { ok:true }; // idempotent
     t.registeredPlayers.push({ userId, socketId: null, name:playerName, chips:t.startingStack, tableId:null, seatIdx:null, eliminated:false, place:null, prize:0 });
-    t.prizePool = Math.floor(t.registeredPlayers.length * t.buyIn * 0.95 * 100) / 100;
-    if (t.prizePool < t.guarantee) t.prizePool = t.guarantee;
-    // Prefer the frozen template percentages if present; fall back to field-size defaults.
-    if (t.prizePcts?.length) {
-      t.prizes = t.prizePcts.map((pct, i) => ({
-        place: i + 1, pct,
-        amount: Math.floor(t.prizePool * pct / 100 * 100) / 100,
-      }));
-    } else {
-      t.prizes = getPrizeStructure(t.registeredPlayers.length, t.prizePool, t.isSNG||false);
-    }
+    _recomputePrizes(t);
     return { ok:true };
   },
 
@@ -212,6 +214,7 @@ const tournamentEngine = {
   start(tournId, io, onTableState) {
     const t = tournaments[tournId];
     if (!t) return { ok:false, error:'Not found' };
+    if (t.status === 'running' || t.status === 'finished') return { ok:false, error:'Already ' + t.status };
     if (t.registeredPlayers.length < 2) return { ok:false, error:'Need at least 2 players' };
     t.status = 'running';
     t.startTime = Date.now();
@@ -330,9 +333,11 @@ const tournamentEngine = {
 
   _broadcastTournState(t, io) {
     const state = this.getState(t.id);
-    // Broadcast to all registered players
-    t.registeredPlayers.forEach(p => io.to(p.socketId).emit('tournState', state));
-    // Also broadcast to admin room
+    // Broadcast to all registered human players (bots have synthetic socketIds).
+    t.registeredPlayers.forEach(p => {
+      if (p.isBot || !p.socketId) return;
+      io.to(p.socketId).emit('tournState', state);
+    });
     io.to('admin').emit('tournState', state);
   },
 };
