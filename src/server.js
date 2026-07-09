@@ -1068,12 +1068,15 @@ function _pickBotAction(state, seat) {
 function _playBotIfActive(tableId, tournId) {
   setTimeout(async () => {
     const state = tableManager.getTableState(tableId);
-    if (!state || state.phase === 'waiting' || state.phase === 'starting') return;
+    if (!state) { console.log(`[Bot] no state for ${tableId}`); return; }
+    if (state.phase === 'waiting' || state.phase === 'starting') { console.log(`[Bot] ${tableId} phase=${state.phase}, skip`); return; }
     const actor = state.seats[state.actIdx];
+    console.log(`[Bot] ${tableId} actIdx=${state.actIdx} actor=${actor?.name} socketId=${actor?.socketId} phase=${state.phase}`);
     if (!actor || !actor.socketId?.startsWith('bot_')) return;
     const decision = _pickBotAction(state, actor);
+    console.log(`[Bot] ${actor.name} decides ${decision.action} ${decision.amount}`);
     const result = tableManager.handleAction(tableId, actor.socketId, decision.action, decision.amount);
-    if (!result.ok) return;
+    if (!result.ok) { console.log(`[Bot] handleAction rejected:`, result.error); return; }
     const newState = tableManager.getTableState(tableId);
     io.to(tableId).emit('tableState', newState);
     if (result.handOver) {
