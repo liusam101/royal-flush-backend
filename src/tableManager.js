@@ -59,10 +59,10 @@ const tableManager = {
   },
 
   // Create a new dynamic table (for SNGs/tournaments)
-  createTable(tableId, { name, sb, bb, maxSeats, isTournament=false }) {
+  createTable(tableId, { name, sb, bb, ante=0, maxSeats, isTournament=false }) {
     if (tables[tableId]) return; // already exists
     tables[tableId] = {
-      id: tableId, name, sb, bb, maxSeats,
+      id: tableId, name, sb, bb, ante, maxSeats,
       seats: [], engine: new GameEngine(sb, bb),
       phase: 'waiting', pot: 0, sidePots: [], board: [],
       actIdx: 0, dealerIdx: 0, isTournament,
@@ -70,15 +70,15 @@ const tableManager = {
     };
   },
 
-  // Update blinds (for tournament blind levels)
-  updateBlinds(tableId, sb, bb) {
+  // Update blinds (and optional ante) for tournament blind levels.
+  updateBlinds(tableId, sb, bb, ante = 0) {
     const t = tables[tableId];
     if (!t) return;
     const inProgress = t.phase !== 'waiting' && t.phase !== 'starting';
     if (inProgress) {
-      t.pendingBlinds = { sb, bb };
+      t.pendingBlinds = { sb, bb, ante };
     } else {
-      t.sb = sb; t.bb = bb;
+      t.sb = sb; t.bb = bb; t.ante = ante;
       t.pendingBlinds = null;
     }
   },
@@ -111,7 +111,7 @@ const tableManager = {
     const inProgress = t.phase !== 'waiting' && t.phase !== 'starting';
     return {
       id: t.id, name: t.name, phase: t.phase, pot: t.pot,
-      sb: t.sb, bb: t.bb, maxSeats: t.maxSeats,
+      sb: t.sb, bb: t.bb, ante: t.ante || 0, maxSeats: t.maxSeats,
       board: t.board, sidePots: t.sidePots || [],
       seats: t.seats.map((s, i) => ({
         seat:     s.seat,
@@ -458,6 +458,7 @@ const tableManager = {
     if (t.pendingBlinds) {
       t.sb = t.pendingBlinds.sb;
       t.bb = t.pendingBlinds.bb;
+      if (t.pendingBlinds.ante != null) t.ante = t.pendingBlinds.ante;
       t.pendingBlinds = null;
     }
     t.engine.newDeck();
@@ -466,9 +467,10 @@ const tableManager = {
     t.seats.forEach(s => { s.folded = false; s.bet = 0; s.totalBet = 0; s.cards = t.engine.dealTwo(); });
 
     const n = t.seats.length;
+    let sbIdx, bbIdx;
     if (n === 2) {
-      const sbIdx = t.dealerIdx % n;
-      const bbIdx = (t.dealerIdx + 1) % n;
+      sbIdx = t.dealerIdx % n;
+      bbIdx = (t.dealerIdx + 1) % n;
       t.bbIdx = bbIdx;
       const sb = Math.min(t.sb, t.seats[sbIdx].stack);
       const bb = Math.min(t.bb, t.seats[bbIdx].stack);
@@ -476,8 +478,8 @@ const tableManager = {
       t.seats[bbIdx].stack -= bb; t.seats[bbIdx].bet = bb; t.seats[bbIdx].totalBet = bb; t.pot += bb;
       t.actIdx = sbIdx;
     } else {
-      const sbIdx = (t.dealerIdx + 1) % n;
-      const bbIdx = (t.dealerIdx + 2) % n;
+      sbIdx = (t.dealerIdx + 1) % n;
+      bbIdx = (t.dealerIdx + 2) % n;
       t.bbIdx = bbIdx;
       const sb = Math.min(t.sb, t.seats[sbIdx].stack);
       const bb = Math.min(t.bb, t.seats[bbIdx].stack);
@@ -485,9 +487,18 @@ const tableManager = {
       t.seats[bbIdx].stack -= bb; t.seats[bbIdx].bet = bb; t.seats[bbIdx].totalBet = bb; t.pot += bb;
       t.actIdx = (bbIdx + 1) % n;
     }
+    // Big-blind ante: only BB posts the ante on top of the big blind. Goes directly to the pot,
+    // does NOT count toward the BB's bet-to-call amount (so preflop action still resolves normally).
+    if (t.ante && t.ante > 0) {
+      const bbSeat = t.seats[bbIdx];
+      const anteAmt = Math.min(t.ante, bbSeat.stack);
+      bbSeat.stack -= anteAmt;
+      bbSeat.totalBet += anteAmt;
+      t.pot += anteAmt;
+    }
     // Posting a blind is not acting — reset after blinds so BB retains their option
     t.seats.forEach(s => s.acted = false);
-    console.log(`    [${tableId}] Hand — ${t.seats.map(s=>s.name).join(' vs ')} | pot=$${t.pot}`);
+    console.log(`    [${tableId}] Hand — ${t.seats.map(s=>s.name).join(' vs ')} | pot=$${t.pot}${t.ante?' (ante '+t.ante+')':''}`);
   },
 
   _nextActor(tableId) {
