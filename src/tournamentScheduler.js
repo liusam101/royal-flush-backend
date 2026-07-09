@@ -106,7 +106,7 @@ async function generateUpcomingTournaments() {
              ON CONFLICT (template_id, start_time) WHERE template_id IS NOT NULL DO NOTHING
              RETURNING id`,
             [id, tpl.id, tpl.name, tpl.buy_in, tpl.starting_stack, tpl.blind_mins,
-             tpl.max_players, tpl.guarantee, tpl.prize_structure, startTime]);
+             tpl.max_players, tpl.guarantee, JSON.stringify(tpl.prize_structure), startTime]);
           return r.rowCount;
         });
         if (result > 0) generated++; else skipped++;
