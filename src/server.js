@@ -173,11 +173,9 @@ function tryStartNewHand(tableId) {
   const newState = tableManager.getTableState(tableId);
   io.to(tableId).emit('tableState', newState);
   dealCardsToAll(tableId);
-  const tbl = tableManager.getTables ? tableManager.getTables()[tableId] : null;
   handHistory.startHand(tableId, newState.seats||[], { sb: newState.sb, bb: newState.bb });
-  // If the first actor is a bot, let it play. Look up tournId via the seat's tournament.
-  const t = tableManager.getTables ? tableManager.getTables()[tableId] : null;
-  if (t?.isTournament) {
+  // If any seat is a bot, run the bot loop (harmless for cash tables — bots aren't seated there)
+  if (newState.seats?.some(s => s.socketId?.startsWith('bot_'))) {
     const tournId = tableId.split('_table')[0];
     _playBotIfActive(tableId, tournId);
   }
@@ -1068,15 +1066,13 @@ function _pickBotAction(state, seat) {
 function _playBotIfActive(tableId, tournId) {
   setTimeout(async () => {
     const state = tableManager.getTableState(tableId);
-    if (!state) { console.log(`[Bot] no state for ${tableId}`); return; }
-    if (state.phase === 'waiting' || state.phase === 'starting') { console.log(`[Bot] ${tableId} phase=${state.phase}, skip`); return; }
-    const actor = state.seats[state.actIdx];
-    console.log(`[Bot] ${tableId} actIdx=${state.actIdx} actor=${actor?.name} socketId=${actor?.socketId} phase=${state.phase}`);
+    if (!state) return;
+    if (state.phase === 'waiting' || state.phase === 'starting') return;
+    const actor = state.seats.find(s => s.acting);
     if (!actor || !actor.socketId?.startsWith('bot_')) return;
     const decision = _pickBotAction(state, actor);
-    console.log(`[Bot] ${actor.name} decides ${decision.action} ${decision.amount}`);
     const result = tableManager.handleAction(tableId, actor.socketId, decision.action, decision.amount);
-    if (!result.ok) { console.log(`[Bot] handleAction rejected:`, result.error); return; }
+    if (!result.ok) { console.log(`[Bot] handleAction rejected for ${actor.name}: ${result.error}`); return; }
     const newState = tableManager.getTableState(tableId);
     io.to(tableId).emit('tableState', newState);
     if (result.handOver) {
