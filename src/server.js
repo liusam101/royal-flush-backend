@@ -1030,6 +1030,8 @@ async function _launchPersistentTournament(tourn) {
     const pSocket = io.sockets.sockets.get(p.socketId);
     if (!pSocket) return;
     pSocket.join(p.tableId);
+    // Tell the client which seat is theirs so action buttons can render.
+    pSocket.emit('joinedTable', { tableId: p.tableId, seat: p.seatIdx ?? 0 });
     pSocket.emit('tournStarted', {
       tournId: tourn.id,
       tableId: p.tableId,
