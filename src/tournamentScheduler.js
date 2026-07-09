@@ -26,6 +26,7 @@ function expandRecurrence(tpl, from, to) {
   if (type === 'hourly') {
     // Every `interval` hours anchored at midnight UTC + offset from recurrence_time (HH:MM UTC).
     // Default anchor 00:00 if no time given.
+    if (interval <= 0) return []; // guard against infinite loop from bad template data
     const [hh, mm] = (time || '00:00').split(':').map(Number);
     const offsetMs = ((hh || 0) * 60 + (mm || 0)) * 60000;
     const intervalMs = interval * 60 * 60 * 1000;
@@ -61,6 +62,7 @@ function expandRecurrence(tpl, from, to) {
     const dow = parseInt(m[1], 10);
     const hh = parseInt(m[2], 10);
     const mm = parseInt(m[3], 10);
+    if (dow < 0 || dow > 6) return []; // guard against infinite loop from bad DOW
     const out = [];
     // Anchor: today at hh:mm UTC, then shift to matching DOW
     let d = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate(), hh, mm));
