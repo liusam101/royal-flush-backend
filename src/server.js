@@ -169,6 +169,12 @@ function tryStartNewHand(tableId) {
   const state = tableManager.getTableState(tableId);
   if (!state || state.seats.length < 2) return;
   if (state.phase !== 'waiting' && state.phase !== 'starting') return;
+  // Tournament rules: don't start new hands during a scheduled break or bubble sync.
+  if (tableId.includes('_table')) {
+    const tournId = tableId.split('_table')[0];
+    if (tournamentEngine.isOnBreak?.(tournId)) return;
+    if (tournamentEngine.isBubbleWaiting?.(tournId, tableId)) return;
+  }
   tableManager.startNewHandAndDeal(tableId);
   const newState = tableManager.getTableState(tableId);
   io.to(tableId).emit('tableState', newState);
@@ -572,6 +578,79 @@ io.on('connection', async (socket) => {
         });
         console.log(`[LateReg] ${socket.username || 'player'} joined ${tournId} at ${targetTid} seat ${newSeatIdx}`);
       }
+    }
+  });
+
+  socket.on('tournReenter', async ({ tournId, playerName }) => {
+    const tourn = tournamentEngine.get(tournId);
+    if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
+    if (!socket.userId) return socket.emit('error', { message: 'Please sign in to re-enter.' });
+    // Re-entry is only allowed during the late-reg window and when tournament is running.
+    const now = Date.now();
+    const lateRegOpen = tourn.status === 'running'
+      && tourn.startTime
+      && (tourn.lateRegMins ?? 60) > 0
+      && now < tourn.startTime + (tourn.lateRegMins ?? 60) * 60 * 1000;
+    if (!lateRegOpen) return socket.emit('error', { message: 'Re-entry window closed' });
+
+    const buyIn = Number(tourn.buyIn) || 0;
+    if (buyIn > 0 && (socket.chips || 0) < buyIn)
+      return socket.emit('error', { message: 'Insufficient balance for re-entry.' });
+
+    const result = tournamentEngine.reenterPlayer(tournId, socket.id, socket.username || playerName, socket.userId);
+    if (!result.ok) return socket.emit('error', { message: result.error });
+
+    if (buyIn > 0) {
+      try {
+        if (getPool()) {
+          await withTransaction(async (client) => {
+            await updateChips(socket.userId, -buyIn, 0, client);
+            await client.query(
+              `INSERT INTO tournament_entries (tourn_id, user_id, username, buy_in, status)
+               VALUES ($1, $2, $3, $4, 'active')`,
+              [tournId, socket.userId, socket.username || playerName, buyIn]);
+          });
+        } else {
+          await updateChips(socket.userId, -buyIn, 0);
+        }
+        socket.chips = Math.max(0, (socket.chips || 0) - buyIn);
+      } catch(e) {
+        // Rollback: mark player eliminated again.
+        const player = tourn.registeredPlayers.find(p => p.userId === socket.userId);
+        if (player) player.eliminated = true;
+        return socket.emit('error', { message: 'Could not process re-entry buy-in.' });
+      }
+    }
+
+    // Seat at smallest live table (mirrors late reg logic).
+    const counts = {};
+    Object.keys(tourn.tables).forEach(tid => {
+      const s = tableManager.getTableState(tid);
+      counts[tid] = s ? s.seats.length : 0;
+    });
+    const targetTid = Object.keys(counts).sort((a,b) => counts[a]-counts[b])[0];
+    if (targetTid) {
+      const blindLevel = tourn.blindLevel || 0;
+      tableManager.joinTable(targetTid, socket.id, socket.username || playerName, tourn.startingStack);
+      const player = tourn.registeredPlayers.find(p => p.userId === socket.userId);
+      if (player) {
+        player.tableId = targetTid;
+        const s = tableManager.getTableState(targetTid);
+        player.seatIdx = s?.seats?.length ? s.seats.length - 1 : 0;
+        if (tourn.tables[targetTid]) tourn.tables[targetTid].seats.push({ socketId: socket.id, name: player.name, chips: tourn.startingStack });
+      }
+      const state = tableManager.getTableState(targetTid);
+      const newSeatIdx = state?.seats?.findIndex(x => x.socketId === socket.id) ?? 0;
+      socket.join(targetTid);
+      socket.emit('joinedTable', { tableId: targetTid, seat: newSeatIdx });
+      socket.emit('tournStarted', {
+        tournId,
+        tableId: targetTid,
+        state: { blinds: { sb: STD_BLINDS[blindLevel][0], bb: STD_BLINDS[blindLevel][1] } },
+      });
+      socket.emit('tournReentered', { tournId, reentryCount: result.reentryCount, balance: socket.chips });
+      io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
+      console.log(`[Reenter] ${socket.username || 'player'} re-entered ${tournId} (entry #${result.reentryCount+1})`);
     }
   });
 
@@ -1223,15 +1302,33 @@ async function _processTournHandOver(tableId, tournId, result) {
     // Table balancing: check if any players need to move between tables. Runs between hands.
     _applyTableBalancing(tournId);
     io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
+
+    // Bubble hand-for-hand coordination: if we're on the bubble, mark this table ready
+    // and only start new hands when ALL tables have finished the current hand.
+    const onBubble = tournamentEngine.isOnBubble(tournId);
+    if (onBubble) {
+      tournamentEngine.markTableReadyDuringBubble(tournId, tableId);
+      io.emit('tournBubbleSync', { tournId, tableId, waiting: true });
+    }
     setTimeout(() => {
-      // Restart all remaining tables (in case any got new arrivals from balancing).
       const tRemaining = tournamentEngine.get(tournId);
-      if (tRemaining && tRemaining.status === 'running') {
-        Object.keys(tRemaining.tables).forEach(tid => {
-          tryStartNewHand(tid);
-          _playBotIfActive(tid, tournId);
-        });
+      if (!tRemaining || tRemaining.status !== 'running') return;
+      // Refresh bubble state now that timeout elapsed.
+      const bubbleNow = tournamentEngine.isOnBubble(tournId);
+      if (bubbleNow) {
+        // Only start if all tables are ready.
+        let allReady = true;
+        const readyMap = tRemaining._bubbleReady || {};
+        for (const tid of Object.keys(tRemaining.tables)) {
+          if (!readyMap[tid]) { allReady = false; break; }
+        }
+        if (!allReady) return;
+        tournamentEngine.clearBubbleReady(tournId);
       }
+      Object.keys(tRemaining.tables).forEach(tid => {
+        tryStartNewHand(tid);
+        _playBotIfActive(tid, tournId);
+      });
     }, 3500);
   }
 }
