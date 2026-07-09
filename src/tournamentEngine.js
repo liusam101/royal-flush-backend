@@ -57,10 +57,12 @@ function getPrizeStructure(numPlayers, prizePool, isSNG=false) {
   }));
 }
 
+// [sb, bb, ante] — big-blind ante style: only BB posts the ante, starting at level 5.
 const STD_BLINDS = [
-  [25,50],[50,100],[75,150],[100,200],[150,300],[200,400],
-  [300,600],[400,800],[600,1200],[1000,2000],[1500,3000],
-  [2000,4000],[3000,6000],[5000,10000],[10000,20000],
+  [25,50,0],[50,100,0],[75,150,0],[100,200,0],
+  [150,300,300],[200,400,400],[300,600,600],[400,800,800],
+  [600,1200,1200],[1000,2000,2000],[1500,3000,3000],
+  [2000,4000,4000],[3000,6000,6000],[5000,10000,10000],[10000,20000,20000],
 ];
 
 // Fisher-Yates shuffle — used for random seat assignment across tables.
@@ -488,16 +490,15 @@ const tournamentEngine = {
       if (t.status !== 'running') return;
       if (t.onBreakUntil && Date.now() < t.onBreakUntil) return; // paused during break
       t.blindLevel = Math.min(t.blindLevel + 1, STD_BLINDS.length - 1);
-      const [sb, bb] = STD_BLINDS[t.blindLevel];
+      const [sb, bb, ante] = STD_BLINDS[t.blindLevel];
       Object.keys(t.tables).forEach(tid => {
-        tableManager.updateBlinds(tid, sb, bb);
+        tableManager.updateBlinds(tid, sb, bb, ante || 0);
       });
       if (io) {
         io.emit('tournBlindUp', {
           tournId: t.id,
           level: t.blindLevel,
-          sb: STD_BLINDS[t.blindLevel][0],
-          bb: STD_BLINDS[t.blindLevel][1],
+          sb, bb, ante: ante || 0,
         });
         this._broadcastTournState(t, io);
       }
@@ -644,6 +645,7 @@ const tournamentEngine = {
       buyIn: t.buyIn, startingStack: t.startingStack,
       blindLevel: t.blindLevel,
       sb: STD_BLINDS[t.blindLevel][0], bb: STD_BLINDS[t.blindLevel][1],
+      ante: STD_BLINDS[t.blindLevel][2] || 0,
       blindMins: t.blindMins, maxPlayers: t.maxPlayers,
       registered: t.registeredPlayers.length,
       remaining, eliminated: t.registeredPlayers.length - remaining,
