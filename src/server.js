@@ -563,7 +563,10 @@ io.on('connection', async (socket) => {
         }
         socket.chips = (socket.chips || 0) + buyIn;
       } catch(e) {
+        // Refund failed — roll back the engine unregister and tell the user.
         console.error(`[TournUnregister] refund failed for ${tournId}:`, e.message);
+        tournamentEngine.register(tournId, socket.id, socket.username || 'Player', socket.userId);
+        return socket.emit('error', { message: 'Refund failed — please try again.' });
       }
     }
 
@@ -1015,6 +1018,11 @@ antiCheat.on('alert', (alert) => {
 
 // Move a persistent tournament from 'registering' to 'running': seat players, create tables, notify.
 async function _launchPersistentTournament(tourn) {
+  // Guard: don't relaunch a tournament that's already running/finished.
+  if (tourn.status === 'running' || tourn.status === 'finished' || tourn.status === 'cancelled') {
+    console.warn(`[TournLaunch] ${tourn.id} already ${tourn.status}, skipping relaunch`);
+    return;
+  }
   // Refresh socketIds — registration may have been hours ago and users may have reconnected.
   const connectedByUser = new Map();
   for (const skt of io.sockets.sockets.values()) {
@@ -1176,9 +1184,14 @@ async function _processTournHandOver(tableId, tournId, result) {
   }
 }
 
-// Cancel a tournament that never reached the min-players threshold; refund all active entries.
+// Cancel a tournament and refund all active entries. Also cleans up any tableManager
+// tables belonging to it (in case it was mid-run) and stops its blind timer.
 async function _cancelAndRefundTournament(tourn, reason) {
   tournamentEngine.setStatus(tourn.id, 'cancelled');
+  if (tourn.blindTimer) { clearInterval(tourn.blindTimer); tourn.blindTimer = null; }
+  Object.keys(tourn.tables || {}).forEach(tid => {
+    try { tableManager.removeTable(tid); } catch(_) {}
+  });
   try {
     await withTransaction(async (client) => {
       await client.query(`UPDATE tournaments SET status='cancelled', updated_at=now() WHERE id=$1`, [tourn.id]);
@@ -1191,13 +1204,13 @@ async function _cancelAndRefundTournament(tourn, reason) {
           `UPDATE tournament_entries SET status='refunded', updated_at=now() WHERE id=$1`,
           [e.id]);
       }
-      console.log(`[TournTick] ${tourn.id} → cancelled (${reason}); refunded ${entries.length} entries`);
+      console.log(`[TournCancel] ${tourn.id} → cancelled (${reason}); refunded ${entries.length} entries`);
     });
   } catch (e) {
-    console.error(`[TournTick] ${tourn.id} cancel/refund failed:`, e.message);
+    console.error(`[TournCancel] ${tourn.id} cancel/refund failed:`, e.message);
   }
   tourn.registeredPlayers.forEach(p => {
-    if (!p.socketId) return;
+    if (p.isBot || !p.socketId) return;
     const pSocket = io.sockets.sockets.get(p.socketId);
     if (!pSocket) return;
     pSocket.emit('tournCancelled', { tournId: tourn.id, reason });
@@ -1230,8 +1243,15 @@ async function tournamentStatusTick() {
 }
 
 // Hydrate persisted tournaments (scheduled + registering) into the in-memory engine.
+// Also cleans up DB-zombie 'running' tournaments left over from prior crashes: mark them
+// cancelled so recoverOrphanedTournamentEntries refunds any active entries downstream.
 async function hydratePersistentTournaments() {
   if (!getPool()) return;
+  const zombieUpdate = await dbQuery(
+    `UPDATE tournaments SET status='cancelled', updated_at=now()
+     WHERE status='running' RETURNING id`
+  );
+  if (zombieUpdate.length) console.log(`[Hydrate] Marked ${zombieUpdate.length} orphan 'running' tournaments as cancelled.`);
   const rows = await dbQuery(
     `SELECT * FROM tournaments WHERE status IN ('scheduled','registering') ORDER BY start_time ASC`
   );
