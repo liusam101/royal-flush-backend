@@ -71,7 +71,8 @@ function originAllowed(origin, cb) {
   if (!origin || (origin === 'null' && allowNull) || ALLOWED_ORIGINS.includes(origin) || /^http:\/\/localhost(:\d+)?$/.test(origin)) {
     cb(null, true);
   } else {
-    cb(new Error('CORS: origin not allowed'));
+    console.warn('[CORS] rejected origin:', origin);
+    cb(new Error('CORS: origin not allowed (' + origin + ')'));
   }
 }
 
