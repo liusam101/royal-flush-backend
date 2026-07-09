@@ -827,6 +827,23 @@ io.on('connection', async (socket) => {
     console.log(`[Admin] Added ${added.length} bots to ${tournId} (now ${tourn.registeredPlayers.length} total)`);
   });
 
+  // Force-cancel any tournament (scheduled/registering/running/paused) and refund all active
+  // ledger entries. Cleans up dangling running tournaments during testing.
+  socket.on('adminCancelTournament', async ({ secret, tournId }) => {
+    if (secret !== ADMIN_SECRET) return socket.emit('error', { message: 'adminCancelTournament: bad admin secret' });
+    const tourn = tournamentEngine.get(tournId);
+    if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
+    if (tourn.blindTimer) clearInterval(tourn.blindTimer);
+    // Remove any tableManager tables belonging to this tournament
+    Object.keys(tourn.tables || {}).forEach(tid => {
+      try { tableManager.removeTable(tid); } catch(_) {}
+    });
+    await _cancelAndRefundTournament(tourn, 'admin_cancel');
+    io.emit('tournState', tournamentEngine.getState(tournId));
+    console.log(`[Admin] Cancelled tournament ${tournId}`);
+    socket.emit('adminTournCancelled', { tournId });
+  });
+
   socket.on('adminPauseTournament', ({ secret, tournId }) => {
     if (secret !== (ADMIN_SECRET)) return;
     tournamentEngine.pause(tournId);
