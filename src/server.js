@@ -1395,6 +1395,13 @@ async function _processTournHandOver(tableId, tournId, result) {
     if (onBubble) {
       tournamentEngine.markTableReadyDuringBubble(tournId, tableId);
       io.emit('tournBubbleSync', { tournId, tableId, waiting: true });
+      // Speed up auto-fold to 5s on all tables so absent players don't stall the bubble.
+      const tourn = tournamentEngine.get(tournId);
+      if (tourn) Object.keys(tourn.tables).forEach(tid => tableManager.setAutoFoldDelay(tid, 5000));
+    } else {
+      // Post-bubble: restore standard 20s auto-fold.
+      const tourn = tournamentEngine.get(tournId);
+      if (tourn) Object.keys(tourn.tables).forEach(tid => tableManager.setAutoFoldDelay(tid, 20000));
     }
     setTimeout(() => {
       const tRemaining = tournamentEngine.get(tournId);
