@@ -65,6 +65,13 @@ function safeUser(u) {
                        u.showdownTotal  > 0 ? parseFloat((u.showdownWins/u.showdownTotal *100).toFixed(1)) : 0,
       showdownWins:  parseInt(u.showdown_wins  || u.showdownWins  || 0),
       showdownTotal: parseInt(u.showdown_total || u.showdownTotal || 0),
+      mttPlayed:      parseInt(u.mtt_played       || 0),
+      mttItmCount:    parseInt(u.mtt_itm_count    || 0),
+      mttBiggestCash: parseFloat(u.mtt_biggest_cash || 0),
+      mttBestFinish:  u.mtt_best_finish != null ? parseInt(u.mtt_best_finish) : null,
+      mttTotalWon:    parseFloat(u.mtt_total_won    || 0),
+      mttTotalBought: parseFloat(u.mtt_total_bought || 0),
+      mttWins:        parseInt(u.mtt_wins || 0),
     }
   };
 }
