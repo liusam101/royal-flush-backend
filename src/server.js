@@ -175,6 +175,12 @@ function tryStartNewHand(tableId) {
   dealCardsToAll(tableId);
   const tbl = tableManager.getTables ? tableManager.getTables()[tableId] : null;
   handHistory.startHand(tableId, newState.seats||[], { sb: newState.sb, bb: newState.bb });
+  // If the first actor is a bot, let it play. Look up tournId via the seat's tournament.
+  const t = tableManager.getTables ? tableManager.getTables()[tableId] : null;
+  if (t?.isTournament) {
+    const tournId = tableId.split('_table')[0];
+    _playBotIfActive(tableId, tournId);
+  }
 }
 
 // Cash-table crash safety depends on the DB only ever being written via settlement deltas.
@@ -709,72 +715,9 @@ io.on('connection', async (socket) => {
     io.to(tableId).emit('tableState', newState);
 
     if (result.handOver) {
-      io.to(tableId).emit('handResult', result.handResult);
-
-      // Eliminate busted players (stack = 0 after hand)
-      const postState = tableManager.getTableState(tableId);
-      if (postState?.seats) {
-        for (const seat of postState.seats.filter(s => s.stack <= 0)) {
-          const elim = tournamentEngine.eliminatePlayer(tournId, seat.socketId);
-          if (elim) {
-            // Credit prize and settle ledger row atomically (buy-in was debited at sngJoin)
-            const elimSkt = io.sockets.sockets.get(seat.socketId);
-            if (elimSkt?.userId) {
-              if (getPool()) {
-                await withTransaction(async (client) => {
-                  if (elim.prize > 0) await updateChips(elimSkt.userId, elim.prize, 0, client);
-                  await client.query(
-                    `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
-                     WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
-                    [elim.prize, tournId, elimSkt.userId]);
-                }).catch(e => console.error('[TournLedger]', e.message));
-              } else if (elim.prize > 0) {
-                await updateChips(elimSkt.userId, elim.prize, 0).catch(() => {});
-              }
-              if (elim.prize > 0) {
-                if (elimSkt.chips != null) elimSkt.chips += elim.prize;
-                elimSkt.emit('chipsReturned', { balance: elimSkt.chips || 0 });
-              }
-            }
-            io.to(seat.socketId).emit('sngEliminated', {
-              place: elim.place,
-              prize: elim.prize,
-              remainingPlayers: elim.remaining,
-            });
-            tableManager.leaveTable(tableId, seat.socketId);
-          }
-        }
-      }
-
-      const updatedTourn = tournamentEngine.get(tournId);
-      if (updatedTourn.status === 'finished') {
-        // Credit winner prize and settle ledger row atomically
-        const winnerPlayer = updatedTourn.registeredPlayers.find(p => p.place === 1);
-        const wSkt = winnerPlayer ? io.sockets.sockets.get(winnerPlayer.socketId) : null;
-        if (wSkt?.userId) {
-          const wPrize = winnerPlayer.prize || 0;
-          if (getPool()) {
-            await withTransaction(async (client) => {
-              if (wPrize > 0) await updateChips(wSkt.userId, wPrize, 0, client);
-              await client.query(
-                `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
-                 WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
-                [wPrize, tournId, wSkt.userId]);
-            }).catch(e => console.error('[TournLedger]', e.message));
-          } else if (wPrize > 0) {
-            await updateChips(wSkt.userId, wPrize, 0).catch(() => {});
-          }
-          if (wPrize > 0) {
-            if (wSkt.chips != null) wSkt.chips += wPrize;
-            wSkt.emit('chipsReturned', { balance: wSkt.chips || 0 });
-          }
-        }
-        io.to('tourn_' + tournId).emit('sngResult', { results: updatedTourn.results });
-        tableManager.removeTable(tableId);
-      } else {
-        io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
-        setTimeout(() => tryStartNewHand(tableId), 3500);
-      }
+      await _processTournHandOver(tableId, tournId, result);
+    } else {
+      _playBotIfActive(tableId, tournId);
     }
   });
 
@@ -850,10 +793,40 @@ io.on('connection', async (socket) => {
     io.to('admin').emit('tournCreated', tournamentEngine.getState(t.id));
   });
 
-  socket.on('adminStartTournament', ({ secret, tournId }) => {
-    if (secret !== (ADMIN_SECRET)) return;
+  socket.on('adminStartTournament', async ({ secret, tournId }) => {
+    if (secret !== ADMIN_SECRET) return;
+    const tourn = tournamentEngine.get(tournId);
+    if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
+    if (tourn.persistent) {
+      if (tourn.status === 'scheduled') tournamentEngine.setStatus(tournId, 'registering');
+      if (tourn.registeredPlayers.length < 2) {
+        socket.emit('error', { message: 'Need at least 2 players (register bots first)' });
+        return;
+      }
+      await _launchPersistentTournament(tourn);
+      return;
+    }
     const result = tournamentEngine.start(tournId, io);
     if (result.ok) io.emit('tournStarted', tournamentEngine.getState(tournId));
+  });
+
+  socket.on('adminFillWithBots', ({ secret, tournId, count }) => {
+    if (secret !== ADMIN_SECRET) return;
+    const tourn = tournamentEngine.get(tournId);
+    if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
+    if (tourn.status !== 'scheduled' && tourn.status !== 'registering') {
+      return socket.emit('error', { message: 'Can only add bots before start' });
+    }
+    const n = Math.max(1, Math.min(Number(count) || 1, 20));
+    const added = [];
+    for (let i = 0; i < n; i++) {
+      const r = tournamentEngine.addBot(tournId);
+      if (r?.ok) added.push(r.total);
+      else break;
+    }
+    socket.emit('adminBotsAdded', { tournId, added: added.length, total: tourn.registeredPlayers.length });
+    io.emit('tournState', tournamentEngine.getState(tournId));
+    console.log(`[Admin] Added ${added.length} bots to ${tournId} (now ${tourn.registeredPlayers.length} total)`);
   });
 
   socket.on('adminPauseTournament', ({ secret, tournId }) => {
@@ -1027,6 +1000,16 @@ antiCheat.on('alert', (alert) => {
 
 // Move a persistent tournament from 'registering' to 'running': seat players, create tables, notify.
 async function _launchPersistentTournament(tourn) {
+  // Refresh socketIds — registration may have been hours ago and users may have reconnected.
+  const connectedByUser = new Map();
+  for (const skt of io.sockets.sockets.values()) {
+    if (skt.userId) connectedByUser.set(skt.userId, skt.id);
+  }
+  for (const p of tourn.registeredPlayers) {
+    if (p.isBot) continue; // bots have their own synthetic socketId
+    if (p.userId) p.socketId = connectedByUser.get(p.userId) || null;
+  }
+
   const startResult = tournamentEngine.start(tourn.id, io);
   if (!startResult.ok) {
     console.error(`[TournLaunch] ${tourn.id} start failed:`, startResult.error);
@@ -1045,7 +1028,7 @@ async function _launchPersistentTournament(tourn) {
     });
   });
   tourn.registeredPlayers.forEach(p => {
-    if (!p.socketId || !p.tableId) return;
+    if (p.isBot || !p.socketId || !p.tableId) return;
     const pSocket = io.sockets.sockets.get(p.socketId);
     if (!pSocket) return;
     pSocket.join(p.tableId);
@@ -1058,16 +1041,121 @@ async function _launchPersistentTournament(tourn) {
   await dbQuery(`UPDATE tournaments SET status='running', updated_at=now() WHERE id=$1`, [tourn.id]);
   Object.keys(tourn.tables).forEach(tid => {
     tryStartNewHand(tid);
+    _playBotIfActive(tid, tourn.id);
     tableManager.onAutoFold(tid, (autoTid) => {
       const s = tableManager.getTableState(autoTid);
       if (s) io.to(autoTid).emit('tableState', s);
       if (s?.phase === 'waiting' || s?.phase === 'starting') {
         setTimeout(() => tryStartNewHand(autoTid), 3500);
       }
+      _playBotIfActive(autoTid, tourn.id);
     });
   });
   io.emit('tournState', tournamentEngine.getState(tourn.id));
-  console.log(`[TournLaunch] ${tourn.id} → running with ${tourn.registeredPlayers.length} players`);
+  console.log(`[TournLaunch] ${tourn.id} → running with ${tourn.registeredPlayers.length} players (${tourn.registeredPlayers.filter(p=>p.isBot).length} bots)`);
+}
+
+// ── Bot auto-play (test tool) ──────────────────────────────────────────
+function _pickBotAction(state, seat) {
+  const maxBet = Math.max(0, ...state.seats.map(s => s.bet || 0));
+  const toCall = Math.max(0, maxBet - (seat.bet || 0));
+  if (toCall === 0) return { action: 'check', amount: 0 };
+  if (toCall >= seat.stack) return { action: 'call', amount: 0 }; // all-in call
+  if (toCall <= seat.stack * 0.15) return { action: 'call', amount: 0 };
+  return { action: 'fold', amount: 0 };
+}
+
+function _playBotIfActive(tableId, tournId) {
+  setTimeout(async () => {
+    const state = tableManager.getTableState(tableId);
+    if (!state || state.phase === 'waiting' || state.phase === 'starting') return;
+    const actor = state.seats[state.actIdx];
+    if (!actor || !actor.socketId?.startsWith('bot_')) return;
+    const decision = _pickBotAction(state, actor);
+    const result = tableManager.handleAction(tableId, actor.socketId, decision.action, decision.amount);
+    if (!result.ok) return;
+    const newState = tableManager.getTableState(tableId);
+    io.to(tableId).emit('tableState', newState);
+    if (result.handOver) {
+      await _processTournHandOver(tableId, tournId, result);
+    } else {
+      _playBotIfActive(tableId, tournId);
+    }
+  }, 700);
+}
+
+// Shared hand-over post-processing for both sngAction and bot-driven actions.
+async function _processTournHandOver(tableId, tournId, result) {
+  const tourn = tournamentEngine.get(tournId);
+  if (!tourn) return;
+  io.to(tableId).emit('handResult', result.handResult);
+
+  const postState = tableManager.getTableState(tableId);
+  if (postState?.seats) {
+    for (const seat of postState.seats.filter(s => s.stack <= 0)) {
+      const elim = tournamentEngine.eliminatePlayer(tournId, seat.socketId);
+      if (!elim) continue;
+      const elimSkt = io.sockets.sockets.get(seat.socketId);
+      if (elimSkt?.userId) {
+        try {
+          if (getPool()) {
+            await withTransaction(async (client) => {
+              if (elim.prize > 0) await updateChips(elimSkt.userId, elim.prize, 0, client);
+              await client.query(
+                `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
+                 WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
+                [elim.prize, tournId, elimSkt.userId]);
+            });
+          } else if (elim.prize > 0) {
+            await updateChips(elimSkt.userId, elim.prize, 0);
+          }
+          if (elim.prize > 0) {
+            if (elimSkt.chips != null) elimSkt.chips += elim.prize;
+            elimSkt.emit('chipsReturned', { balance: elimSkt.chips || 0 });
+          }
+        } catch(e) { console.error('[TournLedger]', e.message); }
+      }
+      io.to(seat.socketId).emit('sngEliminated', {
+        place: elim.place, prize: elim.prize, remainingPlayers: elim.remaining,
+      });
+      tableManager.leaveTable(tableId, seat.socketId);
+    }
+  }
+
+  const updatedTourn = tournamentEngine.get(tournId);
+  if (updatedTourn.status === 'finished') {
+    const winnerPlayer = updatedTourn.registeredPlayers.find(p => p.place === 1);
+    const wSkt = winnerPlayer ? io.sockets.sockets.get(winnerPlayer.socketId) : null;
+    if (wSkt?.userId) {
+      const wPrize = winnerPlayer.prize || 0;
+      try {
+        if (getPool()) {
+          await withTransaction(async (client) => {
+            if (wPrize > 0) await updateChips(wSkt.userId, wPrize, 0, client);
+            await client.query(
+              `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
+               WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
+              [wPrize, tournId, wSkt.userId]);
+          });
+        } else if (wPrize > 0) {
+          await updateChips(wSkt.userId, wPrize, 0);
+        }
+        if (wPrize > 0) {
+          if (wSkt.chips != null) wSkt.chips += wPrize;
+          wSkt.emit('chipsReturned', { balance: wSkt.chips || 0 });
+        }
+      } catch(e) { console.error('[TournLedger]', e.message); }
+    }
+    io.to('tourn_' + tournId).emit('sngResult', { results: updatedTourn.results });
+    await dbQuery(`UPDATE tournaments SET status='finished', updated_at=now() WHERE id=$1`, [tournId]).catch(()=>{});
+    tableManager.removeTable(tableId);
+  } else {
+    io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
+    setTimeout(() => {
+      tryStartNewHand(tableId);
+      _playBotIfActive(tableId, tournId);
+    }, 3500);
+  }
 }
 
 // Cancel a tournament that never reached the min-players threshold; refund all active entries.
