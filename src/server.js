@@ -252,6 +252,75 @@ app.get('/api/admin/tournaments', _requireAdmin, (req, res) => {
   res.json({ ok:true, tournaments: list });
 });
 
+// Public player profile — returns safe public stats. No auth needed.
+app.get('/api/players/:username', async (req, res) => {
+  if (!getPool()) return res.status(503).json({ ok:false, error:'DB unavailable' });
+  const username = String(req.params.username || '').trim();
+  if (!username) return res.status(400).json({ ok:false, error:'Missing username' });
+  try {
+    const row = await dbQuery(
+      `SELECT id, username, created_at,
+              hands_played, hands_won, total_won, total_lost,
+              showdown_wins, showdown_total,
+              mtt_played, mtt_itm_count, mtt_biggest_cash, mtt_best_finish,
+              mtt_total_won, mtt_total_bought, mtt_wins
+         FROM users
+        WHERE LOWER(username) = LOWER($1) AND banned=false
+        LIMIT 1`,
+      [username]);
+    if (!row.length) return res.status(404).json({ ok:false, error:'Player not found' });
+    const u = row[0];
+    // Recent cashes: top 5 largest prizes from tournament_entries
+    let recentCashes = [];
+    try {
+      recentCashes = await dbQuery(
+        `SELECT te.tourn_id, te.prize, te.updated_at, t.name AS tourn_name
+           FROM tournament_entries te
+           LEFT JOIN tournaments t ON t.id = te.tourn_id
+          WHERE te.user_id = $1 AND te.status = 'settled' AND te.prize > 0
+          ORDER BY te.prize DESC
+          LIMIT 5`,
+        [u.id]);
+    } catch(_) {}
+    res.json({
+      ok: true,
+      player: {
+        username: u.username,
+        memberSince: u.created_at,
+        cash: {
+          handsPlayed: parseInt(u.hands_played || 0),
+          handsWon:    parseInt(u.hands_won || 0),
+          net:         parseFloat(u.total_won || 0) - parseFloat(u.total_lost || 0),
+          showdownWinRate: (u.showdown_total > 0)
+            ? Math.round(u.showdown_wins / u.showdown_total * 1000) / 10
+            : 0,
+        },
+        mtt: {
+          played:      parseInt(u.mtt_played || 0),
+          wins:        parseInt(u.mtt_wins || 0),
+          itmCount:    parseInt(u.mtt_itm_count || 0),
+          biggestCash: parseFloat(u.mtt_biggest_cash || 0),
+          bestFinish:  u.mtt_best_finish != null ? parseInt(u.mtt_best_finish) : null,
+          totalWon:    parseFloat(u.mtt_total_won || 0),
+          totalBought: parseFloat(u.mtt_total_bought || 0),
+          itmPct: (u.mtt_played > 0)
+            ? Math.round(u.mtt_itm_count / u.mtt_played * 1000) / 10
+            : 0,
+        },
+        recentCashes: recentCashes.map(r => ({
+          tournId: r.tourn_id,
+          tournName: r.tourn_name || r.tourn_id,
+          prize: parseFloat(r.prize),
+          when: r.updated_at,
+        })),
+      },
+    });
+  } catch(e) {
+    console.error('[Player Profile]', e.message);
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
 // ── Helpers ──────────────────────────────────────────────────────
 function dealCardsToAll(tableId) {
   const cards = tableManager.getPlayerCards(tableId);
