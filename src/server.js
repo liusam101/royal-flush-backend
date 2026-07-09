@@ -687,6 +687,38 @@ io.on('connection', async (socket) => {
     }
   });
 
+  // Manual rejoin: client explicitly asks to be seated back at their tournament table.
+  // Used when the auto-reconnect on socket handshake didn't fire (e.g. user clicked
+  // "Rejoin" from the lobby view). Server-side effect is the same as auto-reconnect.
+  socket.on('rejoinTournament', ({ tournId }) => {
+    if (!socket.userId) return socket.emit('error', { message: 'Please sign in.' });
+    const tourn = tournamentEngine.get(tournId);
+    if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
+    if (tourn.status !== 'running') return socket.emit('error', { message: 'Tournament not running' });
+    const player = tourn.registeredPlayers.find(p => p.userId === socket.userId && !p.eliminated && p.tableId);
+    if (!player) return socket.emit('error', { message: 'No live seat in this tournament' });
+    const tableId = player.tableId;
+    const oldSocketId = player.socketId;
+    tournamentEngine.updateSocketId(tournId, socket.userId, socket.id);
+    if (oldSocketId && oldSocketId !== socket.id) {
+      const rec = tableManager.reconnectPlayer(tableId, oldSocketId, socket.id);
+      if (rec) tableManager.setSitOut(tableId, socket.id, false);
+    } else {
+      tableManager.setSitOut(tableId, socket.id, false);
+    }
+    socket.join('tourn_' + tournId);
+    socket.join(tableId);
+    const state = tableManager.getTableState(tableId);
+    const seatIdx = state?.seats?.findIndex(s => s.socketId === socket.id) ?? player.seatIdx ?? 0;
+    const blindLevel = tourn.blindLevel || 0;
+    socket.emit('tournReconnected', {
+      tournId, tableId, seat: seatIdx,
+      state: { blinds: { sb: STD_BLINDS[blindLevel][0], bb: STD_BLINDS[blindLevel][1] } },
+    });
+    io.to(tableId).emit('tableState', state);
+    console.log(`    [Rejoin] ${socket.username || socket.userId} → tourn ${tournId} table ${tableId} seat ${seatIdx}`);
+  });
+
   socket.on('tournUnregister', async ({ tournId }) => {
     const tourn = tournamentEngine.get(tournId);
     if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
