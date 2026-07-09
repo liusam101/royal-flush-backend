@@ -184,14 +184,40 @@ const tournamentEngine = {
     return { ok:true };
   },
 
-  // Update a registered player's socketId (e.g. on reconnect).
+  // Update a registered player's socketId (e.g. on reconnect). Clears the disconnected flag.
   updateSocketId(tournId, userId, newSocketId) {
     const t = tournaments[tournId];
     if (!t) return null;
     const p = t.registeredPlayers.find(pl => pl.userId === userId);
     if (!p) return null;
     p.socketId = newSocketId;
+    p.disconnected = false;
     return p;
+  },
+
+  // Mark a player as disconnected (network drop, not a deliberate leave). Preserves their
+  // seat in the tournament — their tableManager seat should be sit-out'd separately by the
+  // caller so the auto-fold timer takes over.
+  markPlayerDisconnected(tournId, socketId) {
+    const t = tournaments[tournId];
+    if (!t) return null;
+    const p = t.registeredPlayers.find(pl => pl.socketId === socketId);
+    if (!p) return null;
+    p.disconnected = true;
+    return p;
+  },
+
+  // Find every tournament this user has a live seat in (registered, not eliminated, has a tableId).
+  // Used by the reconnect flow to restore all sessions on a single connect.
+  findLiveSeatsForUser(userId) {
+    const out = [];
+    for (const tid of Object.keys(tournaments)) {
+      const t = tournaments[tid];
+      if (!t || t.status !== 'running') continue;
+      const p = t.registeredPlayers.find(pl => pl.userId === userId && !pl.eliminated && pl.tableId);
+      if (p) out.push({ tournId: tid, player: p });
+    }
+    return out;
   },
 
   // Persist an existing DB-backed tournament instance into memory.
