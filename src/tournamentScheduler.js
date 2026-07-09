@@ -103,12 +103,12 @@ async function generateUpcomingTournaments() {
           const r = await client.query(
             `INSERT INTO tournaments
                (id, template_id, name, buy_in, starting_stack, blind_mins, max_players, guarantee,
-                prize_structure, start_time, status)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'scheduled')
+                prize_structure, start_time, status, late_reg_mins)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'scheduled',$11)
              ON CONFLICT (template_id, start_time) WHERE template_id IS NOT NULL DO NOTHING
              RETURNING id`,
             [id, tpl.id, tpl.name, tpl.buy_in, tpl.starting_stack, tpl.blind_mins,
-             tpl.max_players, tpl.guarantee, JSON.stringify(tpl.prize_structure), startTime]);
+             tpl.max_players, tpl.guarantee, JSON.stringify(tpl.prize_structure), startTime, tpl.late_reg_mins ?? 60]);
           return r.rowCount;
         });
         if (result > 0) generated++; else skipped++;
