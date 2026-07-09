@@ -495,7 +495,12 @@ io.on('connection', async (socket) => {
   socket.on('tournRegister', async ({ tournId, playerName }) => {
     const tourn = tournamentEngine.get(tournId);
     if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
-    if (tourn.status !== 'registering' && tourn.status !== 'scheduled')
+    const now = Date.now();
+    const lateRegOpen = tourn.status === 'running'
+      && tourn.startTime
+      && (tourn.lateRegMins ?? 60) > 0
+      && now < tourn.startTime + (tourn.lateRegMins ?? 60) * 60 * 1000;
+    if (tourn.status !== 'registering' && tourn.status !== 'scheduled' && !lateRegOpen)
       return socket.emit('error', { message: 'Registration closed' });
     if (!socket.userId) return socket.emit('error', { message: 'Please sign in to register.' });
 
@@ -503,7 +508,9 @@ io.on('connection', async (socket) => {
     if (buyIn > 0 && (socket.chips || 0) < buyIn)
       return socket.emit('error', { message: 'Insufficient balance for this buy-in.' });
 
-    const result = tournamentEngine.register(tournId, socket.id, socket.username || playerName, socket.userId);
+    const result = lateRegOpen
+      ? tournamentEngine.registerLate(tournId, socket.id, socket.username || playerName, socket.userId)
+      : tournamentEngine.register(tournId, socket.id, socket.username || playerName, socket.userId);
     if (!result.ok) return socket.emit('error', { message: result.error });
 
     if (buyIn > 0) {
@@ -524,7 +531,8 @@ io.on('connection', async (socket) => {
         }
         socket.chips = Math.max(0, (socket.chips || 0) - buyIn);
       } catch(e) {
-        tournamentEngine.unregister(tournId, socket.id, socket.userId);
+        // Rollback: remove the player from the engine regardless of tournament status.
+        tourn.registeredPlayers = tourn.registeredPlayers.filter(p => p.userId !== socket.userId);
         return socket.emit('error', { message: 'Could not process buy-in. Please try again.' });
       }
     }
@@ -533,6 +541,38 @@ io.on('connection', async (socket) => {
     socket.emit('tournRegistered', { tournId, registered: result.registered, balance: socket.chips });
     io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
     io.to('admin').emit('tournState', tournamentEngine.getState(tournId));
+
+    // Late registration: seat the player at the smallest live table immediately.
+    if (result.late) {
+      const counts = {};
+      Object.keys(tourn.tables).forEach(tid => {
+        const s = tableManager.getTableState(tid);
+        counts[tid] = s ? s.seats.length : 0;
+      });
+      const targetTid = Object.keys(counts).sort((a,b) => counts[a]-counts[b])[0];
+      if (targetTid) {
+        const blindLevel = tourn.blindLevel || 0;
+        tableManager.joinTable(targetTid, socket.id, socket.username || playerName, tourn.startingStack);
+        // Update engine bookkeeping
+        const player = tourn.registeredPlayers.find(p => p.userId === socket.userId);
+        if (player) {
+          player.tableId = targetTid;
+          const s = tableManager.getTableState(targetTid);
+          player.seatIdx = s?.seats?.length ? s.seats.length - 1 : 0;
+          if (tourn.tables[targetTid]) tourn.tables[targetTid].seats.push({ socketId: socket.id, name: player.name, chips: tourn.startingStack });
+        }
+        const state = tableManager.getTableState(targetTid);
+        const newSeatIdx = state?.seats?.findIndex(x => x.socketId === socket.id) ?? 0;
+        socket.join(targetTid);
+        socket.emit('joinedTable', { tableId: targetTid, seat: newSeatIdx });
+        socket.emit('tournStarted', {
+          tournId,
+          tableId: targetTid,
+          state: { blinds: { sb: STD_BLINDS[blindLevel][0], bb: STD_BLINDS[blindLevel][1] } },
+        });
+        console.log(`[LateReg] ${socket.username || 'player'} joined ${tournId} at ${targetTid} seat ${newSeatIdx}`);
+      }
+    }
   });
 
   socket.on('tournUnregister', async ({ tournId }) => {
@@ -1121,6 +1161,10 @@ async function _processTournHandOver(tableId, tournId, result) {
     for (const seat of postState.seats.filter(s => s.stack <= 0)) {
       const elim = tournamentEngine.eliminatePlayer(tournId, seat.socketId);
       if (!elim) continue;
+      // Emit ITM banner if they cashed
+      if (elim.prize > 0) {
+        io.to(seat.socketId).emit('tournITM', { place: elim.place, prize: elim.prize });
+      }
       const elimSkt = io.sockets.sockets.get(seat.socketId);
       if (elimSkt?.userId) {
         try {
@@ -1176,11 +1220,49 @@ async function _processTournHandOver(tableId, tournId, result) {
     await dbQuery(`UPDATE tournaments SET status='finished', updated_at=now() WHERE id=$1`, [tournId]).catch(()=>{});
     tableManager.removeTable(tableId);
   } else {
+    // Table balancing: check if any players need to move between tables. Runs between hands.
+    _applyTableBalancing(tournId);
     io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
     setTimeout(() => {
-      tryStartNewHand(tableId);
-      _playBotIfActive(tableId, tournId);
+      // Restart all remaining tables (in case any got new arrivals from balancing).
+      const tRemaining = tournamentEngine.get(tournId);
+      if (tRemaining && tRemaining.status === 'running') {
+        Object.keys(tRemaining.tables).forEach(tid => {
+          tryStartNewHand(tid);
+          _playBotIfActive(tid, tournId);
+        });
+      }
     }, 3500);
+  }
+}
+
+// Apply any multi-table balancing/breaking/consolidation moves indicated by the engine.
+// Emits tournTableMove to each affected client so they can leave/rejoin socket rooms.
+function _applyTableBalancing(tournId) {
+  const tourn = tournamentEngine.get(tournId);
+  if (!tourn) return;
+  const moves = tournamentEngine.planTableMoves(tournId, tableManager);
+  if (!moves.length) return;
+  const applied = tournamentEngine.applyTableMoves(tournId, moves, tableManager);
+  for (const mv of applied.moves) {
+    const skt = io.sockets.sockets.get(mv.socketId);
+    if (skt) {
+      skt.leave(mv.fromTableId);
+      skt.join(mv.toTableId);
+      // Compute new seat index from the tableManager state
+      const newState = tableManager.getTableState(mv.toTableId);
+      const newSeatIdx = newState?.seats?.findIndex(x => x.socketId === mv.socketId) ?? 0;
+      skt.emit('tournTableMove', {
+        tournId,
+        fromTableId: mv.fromTableId,
+        toTableId: mv.toTableId,
+        newSeatIdx,
+        reason: mv.reason,
+      });
+    }
+  }
+  if (applied.brokenTables.length) {
+    console.log(`[TournBalance] ${tournId} — moved ${applied.moves.length} player(s), broke ${applied.brokenTables.length} table(s)`);
   }
 }
 
