@@ -124,6 +124,7 @@ const tableManager = {
         acting:   inProgress && i === t.actIdx && !s.folded,
         isDealer: i === t.dealerIdx,
         sitOut:   !!s.sitOut,
+        disconnected: !!s.disconnected,
         // toCall capped at player stack
         toCall: (inProgress && i === t.actIdx)
           ? Math.min(s.stack, Math.max(0, maxBet - (s.bet||0)))
@@ -499,19 +500,28 @@ const tableManager = {
     }
     t.actIdx = next;
 
-    // Auto-fold sit-out players after 20s (matches frontend timer)
+    // Auto-fold sit-out players. Standard = 20s; during bubble hand-for-hand the
+    // tournament layer sets t._fastAutoFoldMs = 5000 so the bubble breaks faster.
     const actor = t.seats[t.actIdx];
     if (actor && actor.sitOut && !actor.folded) {
       if (!actor._autoFoldTimer) {
+        const delay = (t._fastAutoFoldMs && t._fastAutoFoldMs > 0) ? t._fastAutoFoldMs : 20000;
         actor._autoFoldTimer = setTimeout(() => {
           actor._autoFoldTimer = null;
           if (actor.sitOut && !actor.folded && t.seats[t.actIdx] === actor) {
             const result = this.handleAction(tableId, actor.socketId, 'fold', 0);
             if (t._onAutoFold) t._onAutoFold(tableId, result);
           }
-        }, 20000);
+        }, delay);
       }
     }
+  },
+
+  // Server layer calls this to switch a tournament table's auto-fold delay (e.g. bubble mode).
+  setAutoFoldDelay(tableId, ms) {
+    const t = tables[tableId];
+    if (!t) return;
+    t._fastAutoFoldMs = ms;
   },
 
   _bettingDone(tableId) {
