@@ -110,33 +110,46 @@ app.get('/api/assets', (req, res) => {
 // If an auth token is provided, iAmRegistered is populated per tournament.
 app.get('/api/tournaments', async (req, res) => {
   const now = Date.now();
+  const PER_TEMPLATE_LIMIT = 2; // show only the next N instances per template in the lobby
   let userId = null;
   const auth = req.headers.authorization;
   if (auth?.startsWith('Bearer ')) {
     try { userId = (await verifyTokenAsync(auth.slice(7)))?.id || null; } catch(_) {}
   }
-  const list = tournamentEngine.getAll()
+  const sorted = tournamentEngine.getAll()
     .filter(t => t.persistent && (t.status === 'scheduled' || t.status === 'registering' || t.status === 'running'))
-    .sort((a, b) => (a.startTime || 0) - (b.startTime || 0))
-    .map(t => {
-      const state = tournamentEngine.getState(t.id);
-      return {
-        id: t.id,
-        name: t.name,
-        buyIn: t.buyIn,
-        startingStack: t.startingStack,
-        blindMins: t.blindMins,
-        maxPlayers: t.maxPlayers,
-        guarantee: t.guarantee,
-        prizes: state?.prizes || [],
-        prizePool: state?.prizePool || 0,
-        registered: t.registeredPlayers.length,
-        startTime: t.startTime,
-        msUntilStart: t.startTime ? t.startTime - now : null,
-        status: t.status,
-        iAmRegistered: userId ? t.registeredPlayers.some(p => p.userId === userId) : false,
-      };
-    });
+    .sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
+
+  // Cap the number of instances shown per template, but ALWAYS include instances
+  // the user is registered for (so they can see + unregister them).
+  const perTplCount = {};
+  const filtered = sorted.filter(t => {
+    const iAmIn = userId && t.registeredPlayers.some(p => p.userId === userId);
+    if (iAmIn) return true;
+    const key = t.templateId || t.id;
+    perTplCount[key] = (perTplCount[key] || 0) + 1;
+    return perTplCount[key] <= PER_TEMPLATE_LIMIT;
+  });
+
+  const list = filtered.map(t => {
+    const state = tournamentEngine.getState(t.id);
+    return {
+      id: t.id,
+      name: t.name,
+      buyIn: t.buyIn,
+      startingStack: t.startingStack,
+      blindMins: t.blindMins,
+      maxPlayers: t.maxPlayers,
+      guarantee: t.guarantee,
+      prizes: state?.prizes || [],
+      prizePool: state?.prizePool || 0,
+      registered: t.registeredPlayers.length,
+      startTime: t.startTime,
+      msUntilStart: t.startTime ? t.startTime - now : null,
+      status: t.status,
+      iAmRegistered: userId ? t.registeredPlayers.some(p => p.userId === userId) : false,
+    };
+  });
   res.json({ ok: true, tournaments: list });
 });
 
