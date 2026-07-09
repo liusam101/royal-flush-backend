@@ -63,6 +63,16 @@ const STD_BLINDS = [
   [2000,4000],[3000,6000],[5000,10000],[10000,20000],
 ];
 
+// Fisher-Yates shuffle — used for random seat assignment across tables.
+function _shuffle(arr) {
+  const out = [...arr];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
 // Recompute prize pool and prize breakdown for a tournament. Excludes bots since they
 // don't put in a real buy-in. Prefers frozen template percentages when present.
 function _recomputePrizes(t) {
@@ -118,6 +128,23 @@ const tournamentEngine = {
     return { ok:true, registered:t.registeredPlayers.length };
   },
 
+  // Register a player AFTER the tournament has started (late reg window). Same shape as
+  // register() but allows status='running' and does NOT re-seat the whole field.
+  // The server layer must then seat this player at a specific table (smallest by default).
+  registerLate(tournId, socketId, playerName, userId=null) {
+    const t = tournaments[tournId];
+    if (!t) return { ok:false, error:'Tournament not found' };
+    if (t.status !== 'running') return { ok:false, error:'Late reg only allowed while running' };
+    if (t.registeredPlayers.length >= t.maxPlayers) return { ok:false, error:'Tournament full' };
+    const isDup = userId
+      ? t.registeredPlayers.find(p=>p.userId===userId && !p.eliminated)
+      : t.registeredPlayers.find(p=>p.socketId===socketId && !p.eliminated);
+    if (isDup) return { ok:false, error:'Already registered' };
+    t.registeredPlayers.push({ userId, socketId, name:playerName, chips:t.startingStack, tableId:null, seatIdx:null, eliminated:false, place:null, prize:0 });
+    _recomputePrizes(t);
+    return { ok:true, registered:t.registeredPlayers.length, late:true };
+  },
+
   unregister(tournId, socketId, userId=null) {
     const t = tournaments[tournId];
     if (!t) return { ok:false, error:'Tournament not found' };
@@ -157,6 +184,7 @@ const tournamentEngine = {
       blindMins: row.blind_mins,
       maxPlayers: row.max_players,
       guarantee: Number(row.guarantee || 0),
+      lateRegMins: row.late_reg_mins ?? 60,
       status: row.status,                  // 'scheduled' | 'registering' | 'running' | 'finished' | 'cancelled'
       registeredPlayers: [],
       tables: {},
@@ -233,7 +261,7 @@ const tournamentEngine = {
   },
 
   _seatPlayers(t) {
-    const players = [...t.registeredPlayers].filter(p=>!p.eliminated);
+    const players = _shuffle([...t.registeredPlayers].filter(p=>!p.eliminated));
     const tableSize = 9;
     const numTables = Math.ceil(players.length / tableSize);
     t.tables = {};
@@ -245,6 +273,157 @@ const tournamentEngine = {
       p.tableId = tid;
       p.seatIdx = t.tables[tid].seats.length - 1;
     });
+  },
+
+  // ── Multi-table balancing (Phase 2A) ────────────────────────────────
+  // Live counts per table from the actual tableManager state (excludes eliminated seats).
+  _tableCounts(t, tableManager) {
+    const counts = {};
+    Object.keys(t.tables).forEach(tid => {
+      const s = tableManager.getTableState(tid);
+      counts[tid] = s ? s.seats.filter(x => !x.folded || x.stack > 0).length : 0;
+      // Actually count all seats currently at the table (eliminated seats are removed)
+      counts[tid] = s ? s.seats.length : 0;
+    });
+    return counts;
+  },
+
+  // Returns the tableId of the smallest table and biggest table.
+  _extremeTables(counts) {
+    let minTid = null, maxTid = null, minN = Infinity, maxN = -Infinity;
+    for (const tid of Object.keys(counts)) {
+      const n = counts[tid];
+      if (n < minN) { minN = n; minTid = tid; }
+      if (n > maxN) { maxN = n; maxTid = tid; }
+    }
+    return { minTid, minN, maxTid, maxN };
+  },
+
+  // Compute total non-eliminated players across all tournament tables.
+  _totalRemaining(t) {
+    return t.registeredPlayers.filter(p => !p.eliminated).length;
+  },
+
+  // Determine the list of table moves needed for balancing between hands.
+  // Returns an array of { userId, socketId, fromTableId, toTableId, playerName, stack }
+  // Balancing rule: if max_count - min_count >= 2, move one random player from max to min.
+  // Table breaking: if any table has < 5 players AND we have more than one table, break it.
+  // Final table consolidation: if total remaining <= 9 AND we have more than one table, break all.
+  planTableMoves(tournId, tableManager) {
+    const t = tournaments[tournId];
+    if (!t || t.status !== 'running') return [];
+    const tableIds = Object.keys(t.tables);
+    if (tableIds.length <= 1) return [];
+
+    const moves = [];
+    const counts = this._tableCounts(t, tableManager);
+    const totalRemaining = Object.values(counts).reduce((a,b)=>a+b, 0);
+
+    // Final table consolidation — total remaining fits at one table.
+    if (totalRemaining <= 9) {
+      // Pick one table to survive (the one with the most players — fewer moves).
+      const survivor = Object.keys(counts).sort((a,b) => counts[b]-counts[a])[0];
+      for (const tid of tableIds) {
+        if (tid === survivor) continue;
+        const s = tableManager.getTableState(tid);
+        if (!s) continue;
+        for (const seat of s.seats) {
+          moves.push({
+            socketId: seat.socketId,
+            name: seat.name,
+            stack: seat.stack,
+            fromTableId: tid,
+            toTableId: survivor,
+            reason: 'final_table',
+          });
+        }
+      }
+      return moves;
+    }
+
+    // Break any table under 5 seats — dismantle it, distribute players round-robin
+    // to other tables (favouring smaller ones).
+    for (const tid of tableIds) {
+      if (counts[tid] === 0) continue;
+      if (counts[tid] >= 5) continue;
+      const s = tableManager.getTableState(tid);
+      if (!s) continue;
+      // Ensure we still have OTHER tables to move to.
+      const otherTids = tableIds.filter(x => x !== tid && counts[x] > 0);
+      if (!otherTids.length) continue;
+      for (const seat of s.seats) {
+        // Send to the smallest other table.
+        const target = otherTids.sort((a,b) => counts[a]-counts[b])[0];
+        counts[target]++;
+        counts[tid]--;
+        moves.push({
+          socketId: seat.socketId,
+          name: seat.name,
+          stack: seat.stack,
+          fromTableId: tid,
+          toTableId: target,
+          reason: 'table_broken',
+        });
+      }
+    }
+    if (moves.length) return moves;
+
+    // Regular balancing — move one player from biggest table to smallest if diff >= 2.
+    const { minTid, minN, maxTid, maxN } = this._extremeTables(counts);
+    if (maxN - minN >= 2 && minTid && maxTid && minTid !== maxTid) {
+      const s = tableManager.getTableState(maxTid);
+      if (s?.seats?.length) {
+        // Pick a random non-folded seat to move (avoid moving mid-hand fold state)
+        const eligible = s.seats.filter(x => !x.folded && x.stack > 0);
+        const pick = eligible[Math.floor(Math.random() * eligible.length)] || s.seats[0];
+        moves.push({
+          socketId: pick.socketId,
+          name: pick.name,
+          stack: pick.stack,
+          fromTableId: maxTid,
+          toTableId: minTid,
+          reason: 'balance',
+        });
+      }
+    }
+    return moves;
+  },
+
+  // Apply a set of moves to both the tournamentEngine's `t.tables` bookkeeping AND
+  // the actual tableManager tables. Returns { moves, brokenTables:[tid,...] }
+  applyTableMoves(tournId, moves, tableManager) {
+    const t = tournaments[tournId];
+    if (!t) return { moves: [], brokenTables: [] };
+    const brokenTables = new Set();
+    for (const mv of moves) {
+      // Remove from old table
+      tableManager.leaveTable(mv.fromTableId, mv.socketId);
+      // Update engine bookkeeping — find the registeredPlayer that owns this seat and re-point them
+      const player = t.registeredPlayers.find(p => p.socketId === mv.socketId);
+      if (player) {
+        player.tableId = mv.toTableId;
+      }
+      // Seat at new table with the same stack
+      tableManager.joinTable(mv.toTableId, mv.socketId, mv.name, mv.stack);
+      // Update engine's t.tables[fromTableId].seats
+      const from = t.tables[mv.fromTableId];
+      if (from) from.seats = from.seats.filter(x => x.socketId !== mv.socketId);
+      const to = t.tables[mv.toTableId];
+      if (to) to.seats.push({ socketId: mv.socketId, name: mv.name, chips: mv.stack });
+    }
+    // Any source table that's now empty should be considered broken.
+    Object.keys(t.tables).forEach(tid => {
+      const s = tableManager.getTableState(tid);
+      if (!s || s.seats.length === 0) {
+        brokenTables.add(tid);
+      }
+    });
+    // Remove broken tables from tournament bookkeeping.
+    brokenTables.forEach(tid => {
+      delete t.tables[tid];
+      tableManager.removeTable(tid);
+    });
+    return { moves, brokenTables: [...brokenTables] };
   },
 
   _startBlindTimer(t, io, onTableState) {
