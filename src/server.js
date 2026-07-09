@@ -289,6 +289,39 @@ io.on('connection', async (socket) => {
         socket.username = user.username;
         socket.chips    = user.chips; // real DB balance, not undefined
         console.log(`    Auth: ${user.username} (${user.id}) chips=$${user.chips}`);
+
+        // Tournament reconnect: if this user has any live tournament seats, restore them.
+        const liveSeats = tournamentEngine.findLiveSeatsForUser(user.id);
+        for (const { tournId, player } of liveSeats) {
+          const oldSocketId = player.socketId;
+          const tableId = player.tableId;
+          if (!tableId) continue;
+          // Update engine's player socketId and clear the disconnected flag.
+          tournamentEngine.updateSocketId(tournId, user.id, socket.id);
+          // Update the tableManager seat's socketId and clear sit-out.
+          if (oldSocketId && oldSocketId !== socket.id) {
+            const rec = tableManager.reconnectPlayer(tableId, oldSocketId, socket.id);
+            if (rec) tableManager.setSitOut(tableId, socket.id, false);
+          } else {
+            tableManager.setSitOut(tableId, socket.id, false);
+          }
+          // Join the tournament + table rooms.
+          socket.join('tourn_' + tournId);
+          socket.join(tableId);
+          const state = tableManager.getTableState(tableId);
+          const seatIdx = state?.seats?.findIndex(s => s.socketId === socket.id) ?? player.seatIdx ?? 0;
+          const tourn = tournamentEngine.get(tournId);
+          const blindLevel = tourn?.blindLevel || 0;
+          socket.emit('tournReconnected', {
+            tournId,
+            tableId,
+            seat: seatIdx,
+            state: { blinds: { sb: STD_BLINDS[blindLevel][0], bb: STD_BLINDS[blindLevel][1] } },
+          });
+          // Re-emit table state to the room so the reconnecting client sees the current hand.
+          io.to(tableId).emit('tableState', state);
+          console.log(`    [Reconnect] ${user.username} → tourn ${tournId} table ${tableId} seat ${seatIdx}`);
+        }
       }
     } catch(e) { /* invalid token — socket stays unauthenticated */ }
   }
@@ -1024,7 +1057,21 @@ io.on('connection', async (socket) => {
       setTimeout(() => tryStartNewHand(tableId), 3500);
     }
 
-    if (atTable.length > 0 && socket.userId) {
+    // Split into cash-table seats vs tournament-table seats. Tournament seats are held
+    // indefinitely so the player can reconnect and rejoin — the auto-fold timer takes
+    // over while they're gone, so blinds are still deducted. Only cash-table seats get
+    // the 60-second grace-period removal.
+    const cashTableIds  = atTable.filter(tid => !tid.includes('_table'));
+    const tournTableIds = atTable.filter(tid => tid.includes('_table'));
+
+    // Flag tournament players as disconnected in the engine so reconnect can find them.
+    for (const tid of tournTableIds) {
+      const tournId = tid.split('_table')[0];
+      tournamentEngine.markPlayerDisconnected(tournId, socket.id);
+      console.log(`    [DC-Tourn] ${socket.id} disconnected from ${tid} — seat held`);
+    }
+
+    if (cashTableIds.length > 0 && socket.userId) {
       // Authenticated player at a table — 60s grace period to reconnect.
       // Capture chips baseline now (socket object goes away after this handler).
       if (pendingRemovals[socket.userId]) clearTimeout(pendingRemovals[socket.userId].timer);
@@ -1032,28 +1079,35 @@ io.on('connection', async (socket) => {
       const savedUserId    = socket.userId;
       const savedOffTable  = socket.offTableChips ?? 0;
       const savedChips     = socket.chips || 0; // last-synced DB balance
+      const savedCashTids  = [...cashTableIds]; // only cash tables are subject to 60s removal
       pendingRemovals[savedUserId] = {
         socketId:      savedSocketId,
         offTableChips: savedOffTable,
         timer: setTimeout(async () => {
           delete pendingRemovals[savedUserId];
-          const { affected, stack } = tableManager.removePlayer(savedSocketId);
+          // Only remove from cash tables — tournament seats are held indefinitely.
+          let totalStack = 0;
+          const affected = [];
+          for (const tid of savedCashTids) {
+            const { stack } = tableManager.leaveTable(tid, savedSocketId) || { stack: 0 };
+            totalStack += stack || 0;
+            affected.push(tid);
+          }
           if (affected.length > 0) {
             affected.forEach(tid => {
               io.to(tid).emit('tableState', tableManager.getTableState(tid));
               setTimeout(() => tryStartNewHand(tid), 1500);
             });
-            // Compute delta from the DB baseline so we don't add chips incorrectly
-            const trueBalance = savedOffTable + stack;
+            const trueBalance = savedOffTable + totalStack;
             const delta = trueBalance - savedChips;
             if (moneyNonZero(delta)) await updateChips(savedUserId, delta, 0).catch(() => {});
             rg.endSession(savedUserId).catch(() => {});
-            console.log(`    [DC] ${savedSocketId} timed out — seat removed, balance $${trueBalance.toFixed(2)}`);
+            console.log(`    [DC] ${savedSocketId} timed out — cash seat removed, balance $${trueBalance.toFixed(2)}`);
           }
         }, 60000),
       };
-      console.log(`    [DC] ${socket.id} sitting out (60s to reconnect)`);
-    } else if (atTable.length > 0) {
+      console.log(`    [DC] ${socket.id} sitting out (60s to reconnect at cash)`);
+    } else if (cashTableIds.length > 0) {
       // Guest at table — remove after 60s, no chip restoration
       const savedSocketId = socket.id;
       setTimeout(() => {
