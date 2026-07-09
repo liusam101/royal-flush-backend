@@ -113,7 +113,7 @@ app.get('/api/tournaments', async (req, res) => {
   let userId = null;
   const auth = req.headers.authorization;
   if (auth?.startsWith('Bearer ')) {
-    try { userId = (await verifyTokenAsync(auth.slice(7)))?.userId || null; } catch(_) {}
+    try { userId = (await verifyTokenAsync(auth.slice(7)))?.id || null; } catch(_) {}
   }
   const list = tournamentEngine.getAll()
     .filter(t => t.persistent && (t.status === 'scheduled' || t.status === 'registering' || t.status === 'running'))
