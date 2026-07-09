@@ -110,7 +110,6 @@ app.get('/api/assets', (req, res) => {
 // If an auth token is provided, iAmRegistered is populated per tournament.
 app.get('/api/tournaments', async (req, res) => {
   const now = Date.now();
-  const PER_TEMPLATE_LIMIT = 2; // show only the next N instances per template in the lobby
   let userId = null;
   const auth = req.headers.authorization;
   if (auth?.startsWith('Bearer ')) {
@@ -120,16 +119,21 @@ app.get('/api/tournaments', async (req, res) => {
     .filter(t => t.persistent && (t.status === 'scheduled' || t.status === 'registering' || t.status === 'running'))
     .sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
 
-  // Cap the number of instances shown per template, but ALWAYS include instances
-  // the user is registered for (so they can see + unregister them).
-  const perTplCount = {};
-  const filtered = sorted.filter(t => {
-    const iAmIn = userId && t.registeredPlayers.some(p => p.userId === userId);
-    if (iAmIn) return true;
+  // Show exactly one instance per template: the earliest one the user is registered
+  // for if any, otherwise the next upcoming instance.
+  const chosenByTemplate = new Map();
+  for (const t of sorted) {
     const key = t.templateId || t.id;
-    perTplCount[key] = (perTplCount[key] || 0) + 1;
-    return perTplCount[key] <= PER_TEMPLATE_LIMIT;
-  });
+    const iAmIn = userId && t.registeredPlayers.some(p => p.userId === userId);
+    const prev = chosenByTemplate.get(key);
+    if (!prev) {
+      chosenByTemplate.set(key, t);
+    } else if (iAmIn && !(userId && prev.registeredPlayers.some(p => p.userId === userId))) {
+      // Prefer a registered instance over an unregistered earlier one
+      chosenByTemplate.set(key, t);
+    }
+  }
+  const filtered = [...chosenByTemplate.values()].sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
 
   const list = filtered.map(t => {
     const state = tournamentEngine.getState(t.id);
