@@ -83,6 +83,14 @@ async function initDB() {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_expires    BIGINT;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_day TEXT;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS last_rc_day    TEXT;
+      -- MTT stats
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS mtt_played       INT NOT NULL DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS mtt_itm_count    INT NOT NULL DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS mtt_biggest_cash NUMERIC(12,2) NOT NULL DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS mtt_best_finish  INT;                          -- NULL = never played; lower = better
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS mtt_total_won    NUMERIC(12,2) NOT NULL DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS mtt_total_bought NUMERIC(12,2) NOT NULL DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS mtt_wins         INT NOT NULL DEFAULT 0;      -- 1st place finishes
 
       CREATE TABLE IF NOT EXISTS sessions (
         token      TEXT PRIMARY KEY,
