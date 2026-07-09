@@ -183,6 +183,24 @@ const tournamentEngine = {
     return { ok:true };
   },
 
+  // Add a test bot player. Bots have no userId and no ledger entry — they don't inflate
+  // the prize pool but they DO take seats, so a solo human can test against them.
+  addBot(tournId, name) {
+    const t = tournaments[tournId];
+    if (!t) return { ok:false, error:'Tournament not found' };
+    if (t.registeredPlayers.length >= t.maxPlayers) return { ok:false, error:'Tournament full' };
+    const botIdx = t.registeredPlayers.filter(p => p.isBot).length + 1;
+    const socketId = 'bot_' + t.id.slice(-6) + '_' + botIdx + '_' + Date.now();
+    const botName = name || ('Bot ' + botIdx);
+    t.registeredPlayers.push({
+      userId: null, socketId, name: botName, chips: t.startingStack,
+      tableId: null, seatIdx: null, eliminated: false, place: null, prize: 0,
+      isBot: true,
+    });
+    // NOTE: intentionally do NOT recalc prizePool — bots are seat-filler, not real money.
+    return { ok:true, botCount: t.registeredPlayers.filter(p => p.isBot).length, total: t.registeredPlayers.length };
+  },
+
   // Change a tournament's status without other side-effects. Server layer persists.
   setStatus(tournId, newStatus) {
     const t = tournaments[tournId];
