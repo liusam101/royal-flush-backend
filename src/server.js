@@ -794,7 +794,7 @@ io.on('connection', async (socket) => {
   });
 
   socket.on('adminStartTournament', async ({ secret, tournId }) => {
-    if (secret !== ADMIN_SECRET) return;
+    if (secret !== ADMIN_SECRET) return socket.emit('error', { message: 'adminStartTournament: bad admin secret' });
     const tourn = tournamentEngine.get(tournId);
     if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
     if (tourn.persistent) {
@@ -811,7 +811,7 @@ io.on('connection', async (socket) => {
   });
 
   socket.on('adminFillWithBots', ({ secret, tournId, count }) => {
-    if (secret !== ADMIN_SECRET) return;
+    if (secret !== ADMIN_SECRET) return socket.emit('error', { message: 'adminFillWithBots: bad admin secret' });
     const tourn = tournamentEngine.get(tournId);
     if (!tourn) return socket.emit('error', { message: 'Tournament not found' });
     if (tourn.status !== 'scheduled' && tourn.status !== 'registering') {
