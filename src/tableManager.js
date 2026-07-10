@@ -4,14 +4,21 @@ const { roundMoney } = require('./money');
 const tables = {};
 
 const DEFAULT_TABLES = [
-  { id: 'midnight-velvet', name: 'Midnight Velvet', sb: 0.25, bb: 0.5,  maxSeats: 6 },
-  { id: 'cursed-domain',   name: 'Cursed Domain',   sb: 0.5,  bb: 1.0,  maxSeats: 6 },
-  { id: 'grand-royal',     name: 'Grand Royal',      sb: 2.5,  bb: 5.0,  maxSeats: 9 },
+  { id: 'midnight-velvet',   name: 'Midnight Velvet', sb: 0.25, bb: 0.5,  maxSeats: 6, currency: 'royal' },
+  { id: 'cursed-domain',     name: 'Cursed Domain',   sb: 0.5,  bb: 1.0,  maxSeats: 6, currency: 'royal' },
+  { id: 'grand-royal',       name: 'Grand Royal',     sb: 2.5,  bb: 5.0,  maxSeats: 9, currency: 'royal' },
+  // Gold Chip mirrors (free play) — 200x the Royal blinds to line up with a
+  // 250k GC starting balance. Behaviour is identical; only the settlement
+  // wallet differs (users.gold_chips column).
+  { id: 'midnight-velvet-g', name: 'Midnight Velvet', sb: 50,   bb: 100,  maxSeats: 6, currency: 'gold' },
+  { id: 'cursed-domain-g',   name: 'Cursed Domain',   sb: 100,  bb: 200,  maxSeats: 6, currency: 'gold' },
+  { id: 'grand-royal-g',     name: 'Grand Royal',     sb: 500,  bb: 1000, maxSeats: 9, currency: 'gold' },
 ];
 
 DEFAULT_TABLES.forEach(t => {
   tables[t.id] = {
     id: t.id, name: t.name, sb: t.sb, bb: t.bb, maxSeats: t.maxSeats,
+    currency: t.currency || 'royal',
     seats: [], engine: new GameEngine(t.sb, t.bb),
     phase: 'waiting', pot: 0, sidePots: [], board: [],
     actIdx: 0, dealerIdx: 0,
@@ -56,6 +63,12 @@ const tableManager = {
   // Register auto-fold callback
   onAutoFold(tableId, cb) {
     if (tables[tableId]) tables[tableId]._onAutoFold = cb;
+  },
+
+  // 'royal' (Barrel Chips / USD-denominated) or 'gold' (free-play). Cash tables
+  // are seeded with a currency; tournament tables inherit from createTable.
+  getTableCurrency(tableId) {
+    return tables[tableId]?.currency || 'royal';
   },
 
   // Create a new dynamic table (for SNGs/tournaments)
