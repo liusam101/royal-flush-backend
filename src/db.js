@@ -160,6 +160,15 @@ async function initDB() {
       );
       CREATE INDEX IF NOT EXISTS idx_tournament_entries_status ON tournament_entries(status);
 
+      CREATE TABLE IF NOT EXISTS user_achievements (
+        user_id        TEXT NOT NULL,
+        achievement_id TEXT NOT NULL,
+        unlocked_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        metadata       JSONB,
+        PRIMARY KEY (user_id, achievement_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_achievements_user ON user_achievements(user_id);
+
       CREATE TABLE IF NOT EXISTS tournament_templates (
         id                  TEXT PRIMARY KEY,
         name                TEXT NOT NULL,
