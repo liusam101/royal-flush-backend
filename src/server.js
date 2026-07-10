@@ -353,7 +353,59 @@ function dealCardsToAll(tableId) {
   });
 }
 
+// Actual seat-freeing logic — shared by immediate leaveTable, deferred-leave
+// sweeps, and any other module that needs to remove a player fully.
+async function _performLeave(sock, tableId) {
+  const leaveResult = tableManager.leaveTable(tableId, sock.id);
+  const returnedStack = leaveResult?.stack || 0;
+
+  sock.leave(tableId);
+  antiCheat.onLeaveTable(sock.id);
+  if (sock.userId) rg.endSession(sock.userId).catch(() => {});
+  io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+  io.emit('tableListUpdated');
+
+  if (leaveResult?.handResult) {
+    const hr = leaveResult.handResult;
+    io.to(tableId).emit('handResult', hr);
+    handHistory.endHand(tableId, hr);
+    try { await settleHandChips(tableId, hr, 'fold'); }
+    catch(e) { console.error(`[Settle] failed for ${tableId}:`, e.message); }
+    setTimeout(() => tryStartNewHand(tableId), 3500);
+  }
+
+  if (sock.userId) {
+    const trueBalance = (sock.offTableChips ?? 0) + returnedStack;
+    const delta = trueBalance - (sock.chips || 0);
+    if (moneyNonZero(delta)) {
+      await updateChips(sock.userId, delta, 0);
+    }
+    if (delta < 0) rg.recordLoss(sock.userId, Math.abs(delta)).catch(()=>{});
+    sock.offTableChips = null;
+    sock.chips = trueBalance;
+    sock.emit('chipsReturned', { balance: trueBalance });
+  }
+  sock.emit('leaveConfirmed', { tableId });
+}
+
 function tryStartNewHand(tableId) {
+  // Sweep deferred-leave requests first — anyone who asked to leave last hand
+  // gets fully removed before the next deal.
+  const preSweepState = tableManager.getTableState(tableId);
+  const pendingSocketIds = (preSweepState?.seats || [])
+    .map(s => s.socketId)
+    .filter(sid => _pendingLeaves.has(sid));
+  for (const sid of pendingSocketIds) {
+    _pendingLeaves.delete(sid);
+    const sock = io.sockets.sockets.get(sid);
+    if (sock) {
+      _performLeave(sock, tableId).catch(e => console.error(`[PendingLeave] ${sid}:`, e.message));
+    } else {
+      tableManager.leaveTable(tableId, sid);
+      io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+    }
+  }
+
   const state = tableManager.getTableState(tableId);
   if (!state || state.seats.length < 2) return;
   if (state.phase !== 'waiting' && state.phase !== 'starting') return;
@@ -455,6 +507,9 @@ const pendingRemovals = {};
 
 // Chat rate limit: max 1 message per 500ms per socket
 const _chatLastTs = new Map();
+
+// Deferred-leave requests — socketId → { tableId }. Processed after each hand ends.
+const _pendingLeaves = new Map();
 
 // Session name cache for interaction sig alerts (must be declared before main connection handler)
 const sessions = {};
@@ -686,39 +741,30 @@ io.on('connection', async (socket) => {
 
   socket.on('sitOut',       ({ tableId }) => { tableManager.setSitOut(tableId, socket.id, true);  io.to(tableId).emit('tableState', tableManager.getTableState(tableId)); });
   socket.on('returnToTable',({ tableId }) => { tableManager.setSitOut(tableId, socket.id, false); socket.join(tableId); io.to(tableId).emit('tableState', tableManager.getTableState(tableId)); setTimeout(()=>tryStartNewHand(tableId),500); });
+
   socket.on('leaveTable', async ({ tableId }) => {
-    const leaveResult = tableManager.leaveTable(tableId, socket.id);
-    const returnedStack = leaveResult?.stack || 0;
+    await _performLeave(socket, tableId);
+  });
 
-    socket.leave(tableId);
-    antiCheat.onLeaveTable(socket.id);
-    if (socket.userId) rg.endSession(socket.userId).catch(() => {});
-    io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
-    io.emit('tableListUpdated');  // refresh lobby player counts for all clients
-
-    // If leaving mid-hand awarded the pot to someone, emit handResult and credit winner
-    if (leaveResult?.handResult) {
-      const hr = leaveResult.handResult;
-      io.to(tableId).emit('handResult', hr);
-      handHistory.endHand(tableId, hr);
-      try { await settleHandChips(tableId, hr, 'fold'); }
-      catch(e) { console.error(`[Settle] failed for ${tableId}:`, e.message); }
-      setTimeout(() => tryStartNewHand(tableId), 3500);
+  // GGPoker-style deferred leave: if the player is currently in a live hand,
+  // mark them for post-hand removal so they can play the current hand out.
+  // Otherwise leave immediately.
+  socket.on('requestLeave', async ({ tableId }) => {
+    const state = tableManager.getTableState(tableId);
+    const seat = state?.seats?.find(s => s.socketId === socket.id);
+    const midHand = state && state.phase !== 'waiting' && state.phase !== 'starting';
+    const stillInHand = seat && !seat.folded && !seat.left;
+    if (midHand && stillInHand) {
+      _pendingLeaves.set(socket.id, { tableId });
+      socket.emit('leavePending', { tableId });
+      return;
     }
+    await _performLeave(socket, tableId);
+  });
 
-    if (socket.userId) {
-      // True balance = what was left off-table + what they're cashing out with
-      const trueBalance = (socket.offTableChips ?? 0) + returnedStack;
-      const delta = trueBalance - (socket.chips || 0);
-      if (moneyNonZero(delta)) {
-        await updateChips(socket.userId, delta, 0);
-      }
-      // Track losses for RG limits — leaving mid-hand forfeits pot
-      if (delta < 0) rg.recordLoss(socket.userId, Math.abs(delta)).catch(()=>{});
-      socket.offTableChips = null;
-      socket.chips = trueBalance;
-      socket.emit('chipsReturned', { balance: trueBalance });
-    }
+  socket.on('cancelLeave', ({ tableId }) => {
+    _pendingLeaves.delete(socket.id);
+    socket.emit('leaveCancelled', { tableId });
   });
   socket.on('chatMessage', ({ tableId, playerName, message }) => {
     // Rate limit: 1 message per 500ms
@@ -1283,6 +1329,7 @@ io.on('connection', async (socket) => {
   socket.on('disconnect', async () => {
     console.log(`[-] ${socket.id}`);
     _chatLastTs.delete(socket.id);
+    _pendingLeaves.delete(socket.id);
     antiCheat.onLeaveTable(socket.id);
     antiCheat.onDisconnect(socket.id);
 
