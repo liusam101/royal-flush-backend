@@ -356,6 +356,7 @@ function dealCardsToAll(tableId) {
 // Actual seat-freeing logic — shared by immediate leaveTable, deferred-leave
 // sweeps, and any other module that needs to remove a player fully.
 async function _performLeave(sock, tableId) {
+  const currency = tableManager.getTableCurrency(tableId);
   const leaveResult = tableManager.leaveTable(tableId, sock.id);
   const returnedStack = leaveResult?.stack || 0;
 
@@ -375,15 +376,17 @@ async function _performLeave(sock, tableId) {
   }
 
   if (sock.userId) {
-    const trueBalance = (sock.offTableChips ?? 0) + returnedStack;
-    const delta = trueBalance - (sock.chips || 0);
+    const w = _walletFor(sock, currency);
+    const trueBalance = w.offTable + returnedStack;
+    const delta = trueBalance - w.balance;
     if (moneyNonZero(delta)) {
-      await updateChips(sock.userId, delta, 0);
+      await _updateChipsFor(sock.userId, delta, currency);
     }
-    if (delta < 0) rg.recordLoss(sock.userId, Math.abs(delta)).catch(()=>{});
-    sock.offTableChips = null;
-    sock.chips = trueBalance;
-    sock.emit('chipsReturned', { balance: trueBalance });
+    if (delta < 0 && currency === 'royal') rg.recordLoss(sock.userId, Math.abs(delta)).catch(()=>{});
+    if (currency === 'gold') sock.offTableGoldChips = null;
+    else                     sock.offTableChips     = null;
+    _setWalletBalance(sock, currency, trueBalance);
+    sock.emit('chipsReturned', { balance: trueBalance, currency });
   }
   sock.emit('leaveConfirmed', { tableId });
 }
@@ -432,17 +435,36 @@ function tryStartNewHand(tableId) {
 // Settles all authenticated players' chip deltas for one finished hand ATOMICALLY,
 // then applies in-memory/side effects only after the DB commit succeeds.
 // statsMode: 'showdown' (playerAction), 'fold' (hand-ending leave / disconnect / autofold)
+// Currency-aware wallet access — cash tables carry a currency flag; tournament
+// tables default to 'royal' (Barrel Chips) because MTT payouts land there.
+function _walletFor(skt, currency) {
+  return currency === 'gold'
+    ? { balance: skt.goldChips || 0,   offTable: skt.offTableGoldChips ?? 0 }
+    : { balance: skt.chips || 0,       offTable: skt.offTableChips ?? 0 };
+}
+function _setWalletBalance(skt, currency, next) {
+  if (currency === 'gold') skt.goldChips = next;
+  else                     skt.chips     = next;
+}
+function _updateChipsFor(userId, delta, currency, client) {
+  return currency === 'gold'
+    ? updateChips(userId, 0, delta, client)
+    : updateChips(userId, delta, 0, client);
+}
+
 async function settleHandChips(tableId, hr, statsMode) {
   const finalState = tableManager.getTableState(tableId);
   if (!finalState?.seats) return;
+  const currency = tableManager.getTableCurrency(tableId);
 
   // Phase 1 — collect deltas (no writes yet)
   const entries = [];
   for (const seat of finalState.seats) {
     const skt = io.sockets.sockets.get(seat.socketId);
     if (!skt?.userId) continue;
-    const trueNow = (skt.offTableChips ?? 0) + seat.stack;
-    const delta = trueNow - (skt.chips || 0);
+    const w = _walletFor(skt, currency);
+    const trueNow = w.offTable + seat.stack;
+    const delta = trueNow - w.balance;
     entries.push({ seat, skt, trueNow, delta });
   }
 
@@ -452,21 +474,21 @@ async function settleHandChips(tableId, hr, statsMode) {
     if (getPool()) {
       await withTransaction(async (client) => {
         for (const e of toWrite) {
-          await updateChips(e.skt.userId, e.delta, 0, client);
+          await _updateChipsFor(e.skt.userId, e.delta, currency, client);
         }
       });
     } else {
-      // Local dev JSON fallback — no transactions available; sequential as before
-      for (const e of toWrite) await updateChips(e.skt.userId, e.delta, 0);
+      for (const e of toWrite) await _updateChipsFor(e.skt.userId, e.delta, currency);
     }
   }
 
   // Phase 3 — post-commit side effects (only runs if the transaction succeeded)
   const isShowdown = statsMode === 'showdown' && hr?.reason === 'showdown';
   for (const e of entries) {
-    if (moneyNonZero(e.delta)) e.skt.chips = e.trueNow;
+    if (moneyNonZero(e.delta)) _setWalletBalance(e.skt, currency, e.trueNow);
     const isWinner = e.seat.name === hr?.winner;
-    if (!isWinner && e.delta < 0)
+    // RG loss tracking only counts real-money (royal) losses.
+    if (!isWinner && e.delta < 0 && currency === 'royal')
       rg.recordLoss(e.skt.userId, Math.abs(e.delta)).catch(() => {});
     updateStats(e.skt.userId, {
       handPlayed: 1,
@@ -528,10 +550,11 @@ io.on('connection', async (socket) => {
     try {
       const user = await verifyTokenAsync(token);
       if (user) {
-        socket.userId   = user.id;
-        socket.username = user.username;
-        socket.chips    = user.chips; // real DB balance, not undefined
-        console.log(`    Auth: ${user.username} (${user.id}) chips=$${user.chips}`);
+        socket.userId    = user.id;
+        socket.username  = user.username;
+        socket.chips     = user.chips; // Barrel-Chip (royal) balance
+        socket.goldChips = user.goldChips || 0; // Gold-Chip balance
+        console.log(`    Auth: ${user.username} (${user.id}) chips=$${user.chips} gold=${socket.goldChips}`);
 
         // Tournament reconnect: if this user has any live tournament seats, restore them.
         const liveSeats = tournamentEngine.findLiveSeatsForUser(user.id);
@@ -592,7 +615,8 @@ io.on('connection', async (socket) => {
       if (reconnected) {
         clearTimeout(pr.timer);
         delete pendingRemovals[socket.userId];
-        socket.offTableChips = pr.offTableChips;
+        if (pr.currency === 'gold') socket.offTableGoldChips = pr.offTableChips;
+        else                        socket.offTableChips     = pr.offTableChips;
         socket.join(tableId);
         console.log(`    ${playerName} reconnected → ${tableId} seat${reconnected.seat}`);
         socket.emit('joinedTable', { tableId, seat: reconnected.seat });
@@ -614,8 +638,23 @@ io.on('connection', async (socket) => {
       return;
     }
 
-    // Responsible gambling check — enforce self-exclusion, cooloff, session/loss limits
+    // Table currency drives which wallet to debit/credit and whether RG limits
+    // apply (RG rules only govern real-money play).
+    const currency = tableManager.getTableCurrency(tableId);
+
+    // Reject the join if the player's wallet in this currency can't cover the
+    // buy-in. Prevents cross-currency exploits (e.g. joining a gold table with
+    // no gold balance).
     if (socket.userId) {
+      const walletBal = currency === 'gold' ? (socket.goldChips || 0) : (socket.chips || 0);
+      if (buyIn > walletBal) {
+        socket.emit('error', { message: 'Insufficient balance for this buy-in.' });
+        return;
+      }
+    }
+
+    // Responsible gambling check — only enforced on real-money (royal) play.
+    if (socket.userId && currency === 'royal') {
       const rgCheck = await rg.checkRGLimits(socket.userId, buyIn);
       if (!rgCheck.ok) {
         socket.emit('error', { message: rgCheck.error || 'Access restricted by responsible gambling limits.' });
@@ -643,10 +682,14 @@ io.on('connection', async (socket) => {
 
     // Track off-table chips only on first join, not on rejoin (reconnect path returns alreadyJoined)
     if (socket.userId && !result.alreadyJoined) {
-      socket.offTableChips = Math.max(0, (socket.chips || 0) - buyIn);
+      if (currency === 'gold') {
+        socket.offTableGoldChips = Math.max(0, (socket.goldChips || 0) - buyIn);
+      } else {
+        socket.offTableChips = Math.max(0, (socket.chips || 0) - buyIn);
+      }
     }
 
-    if (socket.userId && !result.alreadyJoined) rg.startSession(socket.userId, tableId);
+    if (socket.userId && !result.alreadyJoined && currency === 'royal') rg.startSession(socket.userId, tableId);
     socket.join(tableId);
     console.log(`    ${playerName} → ${tableId} seat${result.seat}`);
     socket.emit('joinedTable', { tableId, seat: result.seat });
@@ -1362,20 +1405,22 @@ io.on('connection', async (socket) => {
     }
 
     if (cashTableIds.length > 0 && socket.userId) {
-      // Authenticated player at a table — 60s grace period to reconnect.
-      // Capture chips baseline now (socket object goes away after this handler).
+      // Authenticated player at a cash table — 60s grace period to reconnect.
+      // A single socket only plays one cash table, so we resolve currency from
+      // the first (and only) one.
       if (pendingRemovals[socket.userId]) clearTimeout(pendingRemovals[socket.userId].timer);
       const savedSocketId  = socket.id;
       const savedUserId    = socket.userId;
-      const savedOffTable  = socket.offTableChips ?? 0;
-      const savedChips     = socket.chips || 0; // last-synced DB balance
-      const savedCashTids  = [...cashTableIds]; // only cash tables are subject to 60s removal
+      const savedCashTids  = [...cashTableIds];
+      const currency       = tableManager.getTableCurrency(savedCashTids[0]);
+      const savedOffTable  = currency === 'gold' ? (socket.offTableGoldChips ?? 0) : (socket.offTableChips ?? 0);
+      const savedWallet    = currency === 'gold' ? (socket.goldChips || 0)         : (socket.chips || 0);
       pendingRemovals[savedUserId] = {
         socketId:      savedSocketId,
         offTableChips: savedOffTable,
+        currency,
         timer: setTimeout(async () => {
           delete pendingRemovals[savedUserId];
-          // Only remove from cash tables — tournament seats are held indefinitely.
           let totalStack = 0;
           const affected = [];
           for (const tid of savedCashTids) {
@@ -1389,10 +1434,10 @@ io.on('connection', async (socket) => {
               setTimeout(() => tryStartNewHand(tid), 1500);
             });
             const trueBalance = savedOffTable + totalStack;
-            const delta = trueBalance - savedChips;
-            if (moneyNonZero(delta)) await updateChips(savedUserId, delta, 0).catch(() => {});
-            rg.endSession(savedUserId).catch(() => {});
-            console.log(`    [DC] ${savedSocketId} timed out — cash seat removed, balance $${trueBalance.toFixed(2)}`);
+            const delta = trueBalance - savedWallet;
+            if (moneyNonZero(delta)) await _updateChipsFor(savedUserId, delta, currency).catch(() => {});
+            if (currency === 'royal') rg.endSession(savedUserId).catch(() => {});
+            console.log(`    [DC] ${savedSocketId} timed out — cash seat removed (${currency}), balance ${trueBalance}`);
           }
         }, 60000),
       };
@@ -1408,9 +1453,14 @@ io.on('connection', async (socket) => {
         });
       }, 60000);
     } else {
-      // Not at a table — restore off-table chips right away
-      if (socket.userId && socket.offTableChips != null && socket.offTableChips > 0) {
-        await updateChips(socket.userId, socket.offTableChips, 0).catch(() => {});
+      // Not at a table — restore any off-table wallets right away.
+      if (socket.userId) {
+        if (socket.offTableChips != null && socket.offTableChips > 0) {
+          await updateChips(socket.userId, socket.offTableChips, 0).catch(() => {});
+        }
+        if (socket.offTableGoldChips != null && socket.offTableGoldChips > 0) {
+          await updateChips(socket.userId, 0, socket.offTableGoldChips).catch(() => {});
+        }
       }
     }
   });
