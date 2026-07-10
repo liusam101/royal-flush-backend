@@ -568,6 +568,21 @@ io.on('connection', async (socket) => {
       }
     }
 
+    // Reject if the same user (different socket) already has a seat here —
+    // prevents duplicate seating from multi-table iframe + regular game view.
+    if (socket.userId) {
+      const preState = tableManager.getTableState(tableId);
+      const dup = (preState?.seats || []).some(s => {
+        if (s.socketId === socket.id) return false;
+        const other = io.sockets.sockets.get(s.socketId);
+        return other && other.userId === socket.userId;
+      });
+      if (dup) {
+        socket.emit('error', { message: 'You are already seated at this table in another window.' });
+        return;
+      }
+    }
+
     const result = tableManager.joinTable(tableId, socket.id, playerName, buyIn);
     if (!result.ok) { socket.emit('error', { message: result.error }); return; }
 
