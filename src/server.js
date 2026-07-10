@@ -252,6 +252,30 @@ app.get('/api/admin/tournaments', _requireAdmin, (req, res) => {
   res.json({ ok:true, tournaments: list });
 });
 
+// Fetch achievements for the authed user (locked + unlocked with icons).
+const { checkAchievementsForUser, getUserAchievements } = require('./achievements');
+app.get('/api/me/achievements', async (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith('Bearer ')) return res.status(401).json({ ok:false, error:'Unauthorized' });
+  try {
+    const user = await verifyTokenAsync(auth.slice(7));
+    if (!user?.id) return res.status(401).json({ ok:false, error:'Unauthorized' });
+    const list = await getUserAchievements(user.id);
+    res.json({ ok:true, achievements: list });
+  } catch(e) { res.status(500).json({ ok:false, error: e.message }); }
+});
+
+// Fetch achievements for any player by username (public).
+app.get('/api/players/:username/achievements', async (req, res) => {
+  if (!getPool()) return res.status(503).json({ ok:false, error:'DB unavailable' });
+  try {
+    const row = await dbQuery(`SELECT id FROM users WHERE LOWER(username)=LOWER($1) LIMIT 1`, [req.params.username]);
+    if (!row.length) return res.status(404).json({ ok:false, error:'Player not found' });
+    const list = await getUserAchievements(row[0].id);
+    res.json({ ok:true, achievements: list });
+  } catch(e) { res.status(500).json({ ok:false, error: e.message }); }
+});
+
 // Public player profile — returns safe public stats. No auth needed.
 app.get('/api/players/:username', async (req, res) => {
   if (!getPool()) return res.status(503).json({ ok:false, error:'DB unavailable' });
@@ -737,6 +761,10 @@ io.on('connection', async (socket) => {
           await updateChips(socket.userId, -buyIn, 0);
         }
         socket.chips = Math.max(0, (socket.chips || 0) - buyIn);
+        // Check achievements after this stat change (registration).
+        checkAchievementsForUser(socket.userId).then(newly => {
+          if (newly.length) socket.emit('achievementsUnlocked', { achievements: newly });
+        }).catch(() => {});
       } catch(e) {
         // Rollback: remove the player from the engine regardless of tournament status.
         tourn.registeredPlayers = tourn.registeredPlayers.filter(p => p.userId !== socket.userId);
@@ -1525,6 +1553,10 @@ async function _processTournHandOver(tableId, tournId, result) {
             if (elimSkt.chips != null) elimSkt.chips += elim.prize;
             elimSkt.emit('chipsReturned', { balance: elimSkt.chips || 0 });
           }
+          // Achievement check after bust — ITM, first tourney win, high roller, etc.
+          checkAchievementsForUser(elimSkt.userId).then(newly => {
+            if (newly.length) elimSkt.emit('achievementsUnlocked', { achievements: newly });
+          }).catch(() => {});
         } catch(e) { console.error('[TournLedger]', e.message); }
       }
       io.to(seat.socketId).emit('sngEliminated', {
@@ -1566,6 +1598,10 @@ async function _processTournHandOver(tableId, tournId, result) {
           if (wSkt.chips != null) wSkt.chips += wPrize;
           wSkt.emit('chipsReturned', { balance: wSkt.chips || 0 });
         }
+        // Achievement check after tournament win — champion, triple crown, shark, etc.
+        checkAchievementsForUser(wSkt.userId).then(newly => {
+          if (newly.length) wSkt.emit('achievementsUnlocked', { achievements: newly });
+        }).catch(() => {});
       } catch(e) { console.error('[TournLedger]', e.message); }
     }
     io.to('tourn_' + tournId).emit('sngResult', { results: updatedTourn.results });
