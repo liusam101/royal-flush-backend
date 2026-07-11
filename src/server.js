@@ -664,12 +664,19 @@ io.on('connection', async (socket) => {
 
     // Reject if the same user (different socket) already has a seat here —
     // prevents duplicate seating from multi-table iframe + regular game view.
-    if (socket.userId) {
+    // The name-fallback matters because a racing iframe socket can fire
+    // joinTable before the async JWT handshake stamps socket.userId; without
+    // that fallback, the userId-only check is skipped entirely and a second
+    // seat gets created for the same player.
+    {
+      const myName = socket.username || playerName;
       const preState = tableManager.getTableState(tableId);
       const dup = (preState?.seats || []).some(s => {
         if (s.socketId === socket.id) return false;
         const other = io.sockets.sockets.get(s.socketId);
-        return other && other.userId === socket.userId;
+        if (socket.userId && other && other.userId === socket.userId) return true;
+        if (myName && s.name && s.name === myName) return true;
+        return false;
       });
       if (dup) {
         socket.emit('error', { message: 'You are already seated at this table in another window.' });
