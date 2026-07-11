@@ -141,6 +141,7 @@ app.get('/api/tournaments', async (req, res) => {
       id: t.id,
       name: t.name,
       buyIn: t.buyIn,
+      currency: t.currency || 'royal',
       startingStack: t.startingStack,
       blindMins: t.blindMins,
       maxPlayers: t.maxPlayers,
@@ -183,13 +184,13 @@ app.post('/api/admin/templates', _requireAdmin, async (req, res) => {
       `INSERT INTO tournament_templates
          (id, name, buy_in, starting_stack, blind_mins, max_players, guarantee,
           prize_structure, recurrence_type, recurrence_interval, recurrence_time,
-          late_reg_mins, reentries_allowed, enabled)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14)`,
+          late_reg_mins, reentries_allowed, enabled, currency)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15)`,
       [t.id, t.name, t.buy_in, t.starting_stack ?? 5000, t.blind_mins ?? 10,
        t.max_players ?? 100, t.guarantee ?? 0,
        JSON.stringify(t.prize_structure ?? [65,35]), t.recurrence_type ?? 'once',
        t.recurrence_interval ?? null, t.recurrence_time ?? null,
-       t.late_reg_mins ?? 60, t.reentries_allowed ?? 0, t.enabled ?? true]);
+       t.late_reg_mins ?? 60, t.reentries_allowed ?? 0, t.enabled ?? true, t.currency ?? 'royal']);
     res.json({ ok:true, id: t.id });
   } catch(e) { res.status(500).json({ ok:false, error: e.message }); }
 });
@@ -205,13 +206,13 @@ app.put('/api/admin/templates/:id', _requireAdmin, async (req, res) => {
          SET name=$1, buy_in=$2, starting_stack=$3, blind_mins=$4, max_players=$5,
              guarantee=$6, prize_structure=$7::jsonb, recurrence_type=$8,
              recurrence_interval=$9, recurrence_time=$10, late_reg_mins=$11,
-             reentries_allowed=$12, enabled=$13, updated_at=now()
-       WHERE id=$14`,
+             reentries_allowed=$12, enabled=$13, currency=$14, updated_at=now()
+       WHERE id=$15`,
       [t.name, t.buy_in, t.starting_stack ?? 5000, t.blind_mins ?? 10,
        t.max_players ?? 100, t.guarantee ?? 0,
        JSON.stringify(t.prize_structure ?? [65,35]), t.recurrence_type ?? 'once',
        t.recurrence_interval ?? null, t.recurrence_time ?? null,
-       t.late_reg_mins ?? 60, t.reentries_allowed ?? 0, t.enabled ?? true, id]);
+       t.late_reg_mins ?? 60, t.reentries_allowed ?? 0, t.enabled ?? true, t.currency ?? 'royal', id]);
     res.json({ ok:true });
   } catch(e) { res.status(500).json({ ok:false, error: e.message }); }
 });
@@ -901,7 +902,9 @@ io.on('connection', async (socket) => {
     if (!socket.userId) return socket.emit('error', { message: 'Please sign in to register.' });
 
     const buyIn = Number(tourn.buyIn) || 0;
-    if (buyIn > 0 && (socket.chips || 0) < buyIn)
+    const currency = tourn.currency || 'royal';
+    const walletBal = currency === 'gold' ? (socket.goldChips || 0) : (socket.chips || 0);
+    if (buyIn > 0 && walletBal < buyIn)
       return socket.emit('error', { message: 'Insufficient balance for this buy-in.' });
 
     const result = lateRegOpen
@@ -913,23 +916,30 @@ io.on('connection', async (socket) => {
       try {
         if (getPool()) {
           await withTransaction(async (client) => {
-            await updateChips(socket.userId, -buyIn, 0, client);
+            await _updateChipsFor(socket.userId, -buyIn, currency, client);
             await client.query(
-              `INSERT INTO tournament_entries (tourn_id, user_id, username, buy_in, status)
-               VALUES ($1, $2, $3, $4, 'active')`,
-              [tournId, socket.userId, socket.username || playerName, buyIn]);
+              `INSERT INTO tournament_entries (tourn_id, user_id, username, buy_in, currency, status)
+               VALUES ($1, $2, $3, $4, $5, 'active')`,
+              [tournId, socket.userId, socket.username || playerName, buyIn, currency]);
             await client.query(
               `UPDATE tournaments SET registered=$1, updated_at=now() WHERE id=$2`,
               [tourn.registeredPlayers.length, tournId]);
-            // MTT stats: count this entry
-            await client.query(
-              `UPDATE users SET mtt_played = mtt_played + 1, mtt_total_bought = mtt_total_bought + $1 WHERE id=$2`,
-              [buyIn, socket.userId]);
+            // MTT stats: count this entry (royal only; gold play is free-play)
+            if (currency === 'royal') {
+              await client.query(
+                `UPDATE users SET mtt_played = mtt_played + 1, mtt_total_bought = mtt_total_bought + $1 WHERE id=$2`,
+                [buyIn, socket.userId]);
+            } else {
+              await client.query(
+                `UPDATE users SET mtt_played = mtt_played + 1 WHERE id=$1`,
+                [socket.userId]);
+            }
           });
         } else {
-          await updateChips(socket.userId, -buyIn, 0);
+          await _updateChipsFor(socket.userId, -buyIn, currency);
         }
-        socket.chips = Math.max(0, (socket.chips || 0) - buyIn);
+        if (currency === 'gold') socket.goldChips = Math.max(0, (socket.goldChips || 0) - buyIn);
+        else                     socket.chips     = Math.max(0, (socket.chips || 0) - buyIn);
         // Check achievements after this stat change (registration).
         checkAchievementsForUser(socket.userId).then(newly => {
           if (newly.length) socket.emit('achievementsUnlocked', { achievements: newly });
@@ -942,7 +952,7 @@ io.on('connection', async (socket) => {
     }
 
     socket.join('tourn_' + tournId);
-    socket.emit('tournRegistered', { tournId, registered: result.registered, balance: socket.chips });
+    socket.emit('tournRegistered', { tournId, registered: result.registered, balance: currency === 'gold' ? socket.goldChips : socket.chips, currency });
     io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
     io.to('admin').emit('tournState', tournamentEngine.getState(tournId));
 
@@ -1091,6 +1101,7 @@ io.on('connection', async (socket) => {
       return socket.emit('error', { message: 'Cannot unregister after tournament start' });
 
     const buyIn = Number(tourn.buyIn) || 0;
+    const currency = tourn.currency || 'royal';
     const result = tournamentEngine.unregister(tournId, socket.id, socket.userId);
     if (!result.ok) return socket.emit('error', { message: result.error });
 
@@ -1098,7 +1109,7 @@ io.on('connection', async (socket) => {
       try {
         if (getPool()) {
           await withTransaction(async (client) => {
-            await updateChips(socket.userId, buyIn, 0, client);
+            await _updateChipsFor(socket.userId, buyIn, currency, client);
             await client.query(
               `UPDATE tournament_entries SET status='refunded', updated_at=now()
                WHERE tourn_id=$1 AND user_id=$2 AND status='active'`,
@@ -1108,9 +1119,10 @@ io.on('connection', async (socket) => {
               [tourn.registeredPlayers.length, tournId]);
           });
         } else {
-          await updateChips(socket.userId, buyIn, 0);
+          await _updateChipsFor(socket.userId, buyIn, currency);
         }
-        socket.chips = (socket.chips || 0) + buyIn;
+        if (currency === 'gold') socket.goldChips = (socket.goldChips || 0) + buyIn;
+        else                     socket.chips     = (socket.chips || 0) + buyIn;
       } catch(e) {
         // Refund failed — roll back the engine unregister and tell the user.
         console.error(`[TournUnregister] refund failed for ${tournId}:`, e.message);
@@ -1120,7 +1132,7 @@ io.on('connection', async (socket) => {
     }
 
     socket.leave('tourn_' + tournId);
-    socket.emit('tournUnregistered', { tournId, balance: socket.chips });
+    socket.emit('tournUnregistered', { tournId, balance: currency === 'gold' ? socket.goldChips : socket.chips, currency });
     io.to('tourn_' + tournId).emit('tournState', tournamentEngine.getState(tournId));
     io.to('admin').emit('tournState', tournamentEngine.getState(tournId));
   });
@@ -1697,30 +1709,38 @@ async function _processTournHandOver(tableId, tournId, result) {
       }
       const elimSkt = io.sockets.sockets.get(seat.socketId);
       if (elimSkt?.userId) {
+        const tCurrency = (tournamentEngine.get(tournId)?.currency) || 'royal';
         try {
           if (getPool()) {
             await withTransaction(async (client) => {
-              if (elim.prize > 0) await updateChips(elimSkt.userId, elim.prize, 0, client);
+              if (elim.prize > 0) await _updateChipsFor(elimSkt.userId, elim.prize, tCurrency, client);
               await client.query(
                 `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
                  WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
                 [elim.prize, tournId, elimSkt.userId]);
-              // MTT stats: finish position, prize, ITM tracking
-              await client.query(
-                `UPDATE users SET
-                   mtt_best_finish  = LEAST(COALESCE(mtt_best_finish, 999999), $1),
-                   mtt_biggest_cash = GREATEST(mtt_biggest_cash, $2),
-                   mtt_total_won    = mtt_total_won + $2,
-                   mtt_itm_count    = mtt_itm_count + CASE WHEN $2 > 0 THEN 1 ELSE 0 END
-                 WHERE id=$3`,
-                [elim.place, elim.prize || 0, elimSkt.userId]);
+              // MTT stats: royal only — gold play is free-play so it doesn't affect real-money stats.
+              if (tCurrency === 'royal') {
+                await client.query(
+                  `UPDATE users SET
+                     mtt_best_finish  = LEAST(COALESCE(mtt_best_finish, 999999), $1),
+                     mtt_biggest_cash = GREATEST(mtt_biggest_cash, $2),
+                     mtt_total_won    = mtt_total_won + $2,
+                     mtt_itm_count    = mtt_itm_count + CASE WHEN $2 > 0 THEN 1 ELSE 0 END
+                   WHERE id=$3`,
+                  [elim.place, elim.prize || 0, elimSkt.userId]);
+              }
             });
           } else if (elim.prize > 0) {
-            await updateChips(elimSkt.userId, elim.prize, 0);
+            await _updateChipsFor(elimSkt.userId, elim.prize, tCurrency);
           }
           if (elim.prize > 0) {
-            if (elimSkt.chips != null) elimSkt.chips += elim.prize;
-            elimSkt.emit('chipsReturned', { balance: elimSkt.chips || 0 });
+            if (tCurrency === 'gold') {
+              if (elimSkt.goldChips != null) elimSkt.goldChips += elim.prize;
+              elimSkt.emit('chipsReturned', { balance: elimSkt.goldChips || 0, currency: 'gold' });
+            } else {
+              if (elimSkt.chips != null) elimSkt.chips += elim.prize;
+              elimSkt.emit('chipsReturned', { balance: elimSkt.chips || 0, currency: 'royal' });
+            }
           }
           // Achievement check after bust — ITM, first tourney win, high roller, etc.
           checkAchievementsForUser(elimSkt.userId).then(newly => {
@@ -1741,31 +1761,43 @@ async function _processTournHandOver(tableId, tournId, result) {
     const wSkt = winnerPlayer ? io.sockets.sockets.get(winnerPlayer.socketId) : null;
     if (wSkt?.userId) {
       const wPrize = winnerPlayer.prize || 0;
+      const tCurrency = updatedTourn.currency || 'royal';
       try {
         if (getPool()) {
           await withTransaction(async (client) => {
-            if (wPrize > 0) await updateChips(wSkt.userId, wPrize, 0, client);
+            if (wPrize > 0) await _updateChipsFor(wSkt.userId, wPrize, tCurrency, client);
             await client.query(
               `UPDATE tournament_entries SET status='settled', prize=$1, updated_at=now()
                WHERE tourn_id=$2 AND user_id=$3 AND status='active'`,
               [wPrize, tournId, wSkt.userId]);
-            // MTT stats: 1st place — record win + ITM
-            await client.query(
-              `UPDATE users SET
-                 mtt_best_finish  = LEAST(COALESCE(mtt_best_finish, 999999), 1),
-                 mtt_biggest_cash = GREATEST(mtt_biggest_cash, $1),
-                 mtt_total_won    = mtt_total_won + $1,
-                 mtt_itm_count    = mtt_itm_count + CASE WHEN $1 > 0 THEN 1 ELSE 0 END,
-                 mtt_wins         = mtt_wins + 1
-               WHERE id=$2`,
-              [wPrize || 0, wSkt.userId]);
+            // MTT stats: royal only — gold play is free-play, doesn't count.
+            if (tCurrency === 'royal') {
+              await client.query(
+                `UPDATE users SET
+                   mtt_best_finish  = LEAST(COALESCE(mtt_best_finish, 999999), 1),
+                   mtt_biggest_cash = GREATEST(mtt_biggest_cash, $1),
+                   mtt_total_won    = mtt_total_won + $1,
+                   mtt_itm_count    = mtt_itm_count + CASE WHEN $1 > 0 THEN 1 ELSE 0 END,
+                   mtt_wins         = mtt_wins + 1
+                 WHERE id=$2`,
+                [wPrize || 0, wSkt.userId]);
+            } else {
+              await client.query(
+                `UPDATE users SET mtt_wins = mtt_wins + 1 WHERE id=$1`,
+                [wSkt.userId]);
+            }
           });
         } else if (wPrize > 0) {
-          await updateChips(wSkt.userId, wPrize, 0);
+          await _updateChipsFor(wSkt.userId, wPrize, tCurrency);
         }
         if (wPrize > 0) {
-          if (wSkt.chips != null) wSkt.chips += wPrize;
-          wSkt.emit('chipsReturned', { balance: wSkt.chips || 0 });
+          if (tCurrency === 'gold') {
+            if (wSkt.goldChips != null) wSkt.goldChips += wPrize;
+            wSkt.emit('chipsReturned', { balance: wSkt.goldChips || 0, currency: 'gold' });
+          } else {
+            if (wSkt.chips != null) wSkt.chips += wPrize;
+            wSkt.emit('chipsReturned', { balance: wSkt.chips || 0, currency: 'royal' });
+          }
         }
         // Achievement check after tournament win — champion, triple crown, shark, etc.
         checkAchievementsForUser(wSkt.userId).then(newly => {
@@ -1932,7 +1964,7 @@ async function hydratePersistentTournaments() {
 async function recoverOrphanedTournamentEntries() {
   if (!getPool()) return;
   const rows = await dbQuery(
-    `SELECT id, tourn_id, user_id, username, buy_in FROM tournament_entries WHERE status='active'`
+    `SELECT id, tourn_id, user_id, username, buy_in, currency FROM tournament_entries WHERE status='active'`
   );
   let refunded = 0, restored = 0;
   for (const r of rows) {
@@ -1946,7 +1978,7 @@ async function recoverOrphanedTournamentEntries() {
     }
     try {
       await withTransaction(async (client) => {
-        await updateChips(r.user_id, Number(r.buy_in), 0, client);
+        await _updateChipsFor(r.user_id, Number(r.buy_in), r.currency || 'royal', client);
         await client.query(
           `UPDATE tournament_entries SET status='refunded', updated_at=now() WHERE id=$1`,
           [r.id]);
