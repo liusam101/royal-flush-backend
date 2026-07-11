@@ -409,6 +409,22 @@ function tryStartNewHand(tableId) {
     }
   }
 
+  // Sweep deferred sit-out requests. Applied before the next deal so the
+  // player finishes their current hand normally, then sits out.
+  const soState = tableManager.getTableState(tableId);
+  const soSids  = (soState?.seats || [])
+    .map(s => s.socketId)
+    .filter(sid => _pendingSitOuts.has(sid));
+  if (soSids.length) {
+    for (const sid of soSids) {
+      _pendingSitOuts.delete(sid);
+      tableManager.setSitOut(tableId, sid, true);
+      const sock = io.sockets.sockets.get(sid);
+      if (sock) sock.emit('sitOutApplied', { tableId });
+    }
+    io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+  }
+
   const state = tableManager.getTableState(tableId);
   if (!state || state.seats.length < 2) return;
   if (state.phase !== 'waiting' && state.phase !== 'starting') return;
@@ -532,6 +548,10 @@ const _chatLastTs = new Map();
 
 // Deferred-leave requests — socketId → { tableId }. Processed after each hand ends.
 const _pendingLeaves = new Map();
+
+// Deferred sit-out requests — socketId → { tableId }. Applied before the next
+// deal so the player finishes their current hand normally, then sits out.
+const _pendingSitOuts = new Map();
 
 // Session name cache for interaction sig alerts (must be declared before main connection handler)
 const sessions = {};
@@ -790,7 +810,37 @@ io.on('connection', async (socket) => {
   });
 
   socket.on('sitOut',       ({ tableId }) => { tableManager.setSitOut(tableId, socket.id, true);  io.to(tableId).emit('tableState', tableManager.getTableState(tableId)); });
-  socket.on('returnToTable',({ tableId }) => { tableManager.setSitOut(tableId, socket.id, false); socket.join(tableId); io.to(tableId).emit('tableState', tableManager.getTableState(tableId)); setTimeout(()=>tryStartNewHand(tableId),500); });
+  socket.on('returnToTable',({ tableId }) => {
+    _pendingSitOuts.delete(socket.id); // in case a request was queued
+    tableManager.setSitOut(tableId, socket.id, false);
+    socket.join(tableId);
+    io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+    setTimeout(()=>tryStartNewHand(tableId),500);
+  });
+
+  // GG-style deferred sit-out: mid-hand and still live? queue it — the sweep
+  // in tryStartNewHand flips the seat's sitOut before the next deal. Otherwise
+  // sit out immediately.
+  socket.on('requestSitOut', ({ tableId }) => {
+    const state = tableManager.getTableState(tableId);
+    const seat  = state?.seats?.find(s => s.socketId === socket.id);
+    if (!seat) return;
+    const midHand      = state && state.phase !== 'waiting' && state.phase !== 'starting';
+    const stillInHand  = !seat.folded && !seat.left;
+    if (midHand && stillInHand) {
+      _pendingSitOuts.set(socket.id, { tableId });
+      socket.emit('sitOutPending', { tableId });
+      return;
+    }
+    tableManager.setSitOut(tableId, socket.id, true);
+    io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+    socket.emit('sitOutApplied', { tableId });
+  });
+
+  socket.on('cancelSitOut', ({ tableId }) => {
+    _pendingSitOuts.delete(socket.id);
+    socket.emit('sitOutCancelled', { tableId });
+  });
 
   socket.on('leaveTable', async ({ tableId }) => {
     await _performLeave(socket, tableId);
@@ -1380,6 +1430,7 @@ io.on('connection', async (socket) => {
     console.log(`[-] ${socket.id}`);
     _chatLastTs.delete(socket.id);
     _pendingLeaves.delete(socket.id);
+    _pendingSitOuts.delete(socket.id);
     antiCheat.onLeaveTable(socket.id);
     antiCheat.onDisconnect(socket.id);
 
