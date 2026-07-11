@@ -93,10 +93,11 @@ function _recomputePrizes(t) {
 
 const tournamentEngine = {
 
-  createTournament({ name, buyIn, startingStack=5000, blindMins=10, maxPlayers=100, guarantee=0, adminCreated=true }) {
+  createTournament({ name, buyIn, startingStack=5000, blindMins=10, maxPlayers=100, guarantee=0, adminCreated=true, currency='royal' }) {
     const id = 't' + (tIdCounter++);
     tournaments[id] = {
       id, name, buyIn, startingStack, blindMins, maxPlayers, guarantee,
+      currency,              // 'royal' | 'gold' — routes buy-in + prize wallet
       status: 'registering', // registering | running | paused | finished
       registeredPlayers: [], // { socketId, name, chips, tableId, seatIdx, eliminated, place, prize }
       tables: {},            // tableId → { seats: [{socketId, name, chips}], ...}
@@ -242,6 +243,7 @@ const tournamentEngine = {
       guarantee: Number(row.guarantee || 0),
       lateRegMins: row.late_reg_mins ?? 60,
       reentriesAllowed: row.reentries_allowed ?? 0,
+      currency: row.currency || 'royal',
       status: row.status,                  // 'scheduled' | 'registering' | 'running' | 'finished' | 'cancelled'
       registeredPlayers: [],
       tables: {},
@@ -643,6 +645,7 @@ const tournamentEngine = {
     return {
       id: t.id, name: t.name, status: t.status,
       buyIn: t.buyIn, startingStack: t.startingStack,
+      currency: t.currency || 'royal',
       blindLevel: t.blindLevel,
       sb: STD_BLINDS[t.blindLevel][0], bb: STD_BLINDS[t.blindLevel][1],
       ante: STD_BLINDS[t.blindLevel][2] || 0,
