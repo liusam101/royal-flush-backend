@@ -210,6 +210,11 @@ async function initDB() {
       );
       ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS late_reg_mins INT NOT NULL DEFAULT 60;
       ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS reentries_allowed INT NOT NULL DEFAULT 0;
+      -- Currency: 'royal' (Barrel Chips) or 'gold' (Gold Chips). Drives which
+      -- wallet is debited on register and credited on payout.
+      ALTER TABLE tournaments           ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'royal';
+      ALTER TABLE tournament_templates  ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'royal';
+      ALTER TABLE tournament_entries    ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'royal';
       CREATE INDEX IF NOT EXISTS idx_tournaments_status ON tournaments(status);
       CREATE INDEX IF NOT EXISTS idx_tournaments_start_time ON tournaments(start_time);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_tournaments_template_start
