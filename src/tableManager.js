@@ -137,6 +137,7 @@ const tableManager = {
         acting:   inProgress && i === t.actIdx && !s.folded,
         isDealer: i === t.dealerIdx,
         sitOut:   !!s.sitOut,
+        pendingActive: !!s.pendingActive,
         disconnected: !!s.disconnected,
         // toCall capped at player stack
         toCall: (inProgress && i === t.actIdx)
