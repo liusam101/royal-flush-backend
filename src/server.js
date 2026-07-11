@@ -628,21 +628,29 @@ io.on('connection', async (socket) => {
     const { tableId, playerName: rawPlayerName, buyIn } = data;
     const playerName = socket.username || rawPlayerName;
 
-    // Network-blip reconnect: player has a pending seat at this table
-    if (socket.userId && pendingRemovals[socket.userId]) {
-      const pr = pendingRemovals[socket.userId];
-      const reconnected = tableManager.reconnectPlayer(tableId, pr.socketId, socket.id);
-      if (reconnected) {
-        clearTimeout(pr.timer);
-        delete pendingRemovals[socket.userId];
-        if (pr.currency === 'gold') socket.offTableGoldChips = pr.offTableChips;
-        else                        socket.offTableChips     = pr.offTableChips;
-        socket.join(tableId);
-        console.log(`    ${playerName} reconnected → ${tableId} seat${reconnected.seat}`);
-        socket.emit('joinedTable', { tableId, seat: reconnected.seat });
-        io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
-        if (reconnected.cards?.length) socket.emit('dealCards', { cards: reconnected.cards });
-        return;
+    // Network-blip reconnect. pendingRemovals is keyed by the disconnected
+    // socketId, so a single user with multiple sockets (multi-view iframes)
+    // can have several grace timers running in parallel — one per seat. We
+    // find the entry that matches (userId + this tableId), not just userId.
+    if (socket.userId) {
+      let matchKey = null, matchPr = null;
+      for (const [sid, pr] of Object.entries(pendingRemovals)) {
+        if (pr.userId === socket.userId && pr.tableId === tableId) { matchKey = sid; matchPr = pr; break; }
+      }
+      if (matchPr) {
+        const reconnected = tableManager.reconnectPlayer(tableId, matchPr.socketId, socket.id);
+        if (reconnected) {
+          clearTimeout(matchPr.timer);
+          delete pendingRemovals[matchKey];
+          if (matchPr.currency === 'gold') socket.offTableGoldChips = matchPr.offTableChips;
+          else                             socket.offTableChips     = matchPr.offTableChips;
+          socket.join(tableId);
+          console.log(`    ${playerName} reconnected → ${tableId} seat${reconnected.seat}`);
+          socket.emit('joinedTable', { tableId, seat: reconnected.seat });
+          io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
+          if (reconnected.cards?.length) socket.emit('dealCards', { cards: reconnected.cards });
+          return;
+        }
       }
     }
 
@@ -1464,42 +1472,33 @@ io.on('connection', async (socket) => {
 
     if (cashTableIds.length > 0 && socket.userId) {
       // Authenticated player at a cash table — 60s grace period to reconnect.
-      // A single socket only plays one cash table, so we resolve currency from
-      // the first (and only) one.
-      if (pendingRemovals[socket.userId]) clearTimeout(pendingRemovals[socket.userId].timer);
+      // Keyed by socketId so multi-view (multiple sockets per user) doesn't
+      // clobber sibling timers.
       const savedSocketId  = socket.id;
       const savedUserId    = socket.userId;
-      const savedCashTids  = [...cashTableIds];
-      const currency       = tableManager.getTableCurrency(savedCashTids[0]);
+      const savedTableId   = cashTableIds[0]; // one cash table per socket
+      const currency       = tableManager.getTableCurrency(savedTableId);
       const savedOffTable  = currency === 'gold' ? (socket.offTableGoldChips ?? 0) : (socket.offTableChips ?? 0);
       const savedWallet    = currency === 'gold' ? (socket.goldChips || 0)         : (socket.chips || 0);
-      pendingRemovals[savedUserId] = {
+      pendingRemovals[savedSocketId] = {
         socketId:      savedSocketId,
+        userId:        savedUserId,
+        tableId:       savedTableId,
         offTableChips: savedOffTable,
         currency,
         timer: setTimeout(async () => {
-          delete pendingRemovals[savedUserId];
-          let totalStack = 0;
-          const affected = [];
-          for (const tid of savedCashTids) {
-            const { stack } = tableManager.leaveTable(tid, savedSocketId) || { stack: 0 };
-            totalStack += stack || 0;
-            affected.push(tid);
-          }
-          if (affected.length > 0) {
-            affected.forEach(tid => {
-              io.to(tid).emit('tableState', tableManager.getTableState(tid));
-              setTimeout(() => tryStartNewHand(tid), 1500);
-            });
-            const trueBalance = savedOffTable + totalStack;
-            const delta = trueBalance - savedWallet;
-            if (moneyNonZero(delta)) await _updateChipsFor(savedUserId, delta, currency).catch(() => {});
-            if (currency === 'royal') rg.endSession(savedUserId).catch(() => {});
-            console.log(`    [DC] ${savedSocketId} timed out — cash seat removed (${currency}), balance ${trueBalance}`);
-          }
+          delete pendingRemovals[savedSocketId];
+          const { stack } = tableManager.leaveTable(savedTableId, savedSocketId) || { stack: 0 };
+          io.to(savedTableId).emit('tableState', tableManager.getTableState(savedTableId));
+          setTimeout(() => tryStartNewHand(savedTableId), 1500);
+          const trueBalance = savedOffTable + (stack || 0);
+          const delta = trueBalance - savedWallet;
+          if (moneyNonZero(delta)) await _updateChipsFor(savedUserId, delta, currency).catch(() => {});
+          if (currency === 'royal') rg.endSession(savedUserId).catch(() => {});
+          console.log(`    [DC] ${savedSocketId} timed out — cash seat removed (${currency}), balance ${trueBalance}`);
         }, 60000),
       };
-      console.log(`    [DC] ${socket.id} sitting out (60s to reconnect at cash)`);
+      console.log(`    [DC] ${socket.id} sitting out (60s to reconnect at ${savedTableId})`);
     } else if (cashTableIds.length > 0) {
       // Guest at table — remove after 60s, no chip restoration
       const savedSocketId = socket.id;
