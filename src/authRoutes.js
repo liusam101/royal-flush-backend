@@ -322,26 +322,40 @@ router.post('/avatars', async (req, res) => {
 // ── Daily Login Bonus ──────────────────────────────────────────────────────
 const DAILY_GOLD = 1250;
 
+// Rolling 24h cooldown from the last successful claim. nextClaimAt is when
+// the next claim becomes available (ms epoch). If null, it's claimable now.
 router.get('/daily-bonus/status', authMiddleware, async (req, res) => {
   try {
-    const row = await queryOne('SELECT last_bonus_day FROM users WHERE id = $1', [req.user.id]);
-    const today = new Date().toISOString().slice(0, 10); // UTC date — consistent across timezones
-    const claimed = row?.last_bonus_day === today;
-    res.json({ ok: true, claimed, reward: DAILY_GOLD });
+    const row = await queryOne('SELECT last_bonus_at FROM users WHERE id = $1', [req.user.id]);
+    const last = row?.last_bonus_at ? new Date(row.last_bonus_at).getTime() : 0;
+    const next = last + 24 * 3600 * 1000;
+    const now  = Date.now();
+    const claimed = next > now;
+    res.json({ ok: true, claimed, nextClaimAt: claimed ? next : null, reward: DAILY_GOLD });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
 router.post('/daily-bonus/claim', authMiddleware, async (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10); // UTC date — consistent across timezones
-    // Atomic update — prevents double-claim from race conditions
+    // Atomic: only stamp if last_bonus_at is null or older than 24h. Prevents
+    // double-claim from race conditions and from clock-skew across replicas.
     const rows = await dbQuery(
-      'UPDATE users SET last_bonus_day=$1 WHERE id=$2 AND (last_bonus_day IS DISTINCT FROM $1) RETURNING id',
-      [today, req.user.id]
+      `UPDATE users
+         SET last_bonus_at = NOW()
+       WHERE id = $1
+         AND (last_bonus_at IS NULL OR last_bonus_at < NOW() - INTERVAL '24 hours')
+       RETURNING EXTRACT(EPOCH FROM NOW()) * 1000 AS claimed_ms`,
+      [req.user.id]
     );
-    if (!rows.length) return res.status(400).json({ error: 'Already claimed today' });
+    if (!rows.length) {
+      // Compute nextClaimAt so the client can display a countdown.
+      const cur = await queryOne('SELECT last_bonus_at FROM users WHERE id = $1', [req.user.id]);
+      const last = cur?.last_bonus_at ? new Date(cur.last_bonus_at).getTime() : 0;
+      return res.status(400).json({ error: 'Bonus not ready yet', nextClaimAt: last + 24*3600*1000 });
+    }
     await updateChips(req.user.id, 0, DAILY_GOLD).catch(()=>{});
-    res.json({ ok: true, reward: DAILY_GOLD });
+    const claimedMs = Number(rows[0].claimed_ms);
+    res.json({ ok: true, reward: DAILY_GOLD, nextClaimAt: claimedMs + 24*3600*1000 });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
 });
 
