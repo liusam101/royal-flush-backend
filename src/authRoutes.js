@@ -379,19 +379,12 @@ router.get('/leaderboard', async (req, res) => {
 });
 
 // ── RC daily claim (Barrel Chip — persists balance to DB) ─────────────────
-const RC_DAILY_CHIPS = 1; // $1 RC value
+// TEMP: bumped to 500 for a one-time top-up. Also skips the once-per-day guard
+// so it can be claimed even if already claimed today. REVERT after use.
+const RC_DAILY_CHIPS = 500;
 
 router.post('/rc-claim', authMiddleware, async (req, res) => {
-  const today = new Date().toISOString().slice(0, 10);
   try {
-    // Atomic DB update — same pattern as daily-bonus/claim.
-    // Rejects if last_rc_day already equals today, preventing double-claims
-    // even across server restarts or multiple Railway instances.
-    const rows = await dbQuery(
-      'UPDATE users SET last_rc_day=$1 WHERE id=$2 AND (last_rc_day IS DISTINCT FROM $1) RETURNING id',
-      [today, req.user.id]
-    );
-    if (!rows.length) return res.status(429).json({ error: 'Already claimed today.' });
     await updateChips(req.user.id, RC_DAILY_CHIPS, 0);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: 'Server error' }); }
