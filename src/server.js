@@ -1278,8 +1278,16 @@ io.on('connection', async (socket) => {
     }
     const tableId = player.tableId;
 
-    // SNG path currently passes no ctx (that's refactor #4); add userId now.
-    const acOk = antiCheat.onAction(socket.id, socket.userId, action, tableId);
+    // Mirror the cash-path ctx so timing/ghosting/preflop-stat detectors run
+    // on tournament play too. SNGs use tableManager just like cash tables,
+    // so pot/stack/phase semantics carry over unchanged.
+    const preState = tableManager.getTableState(tableId);
+    const mySeat   = preState?.seats?.find(s => s.socketId === socket.id);
+    const acOk = antiCheat.onAction(socket.id, socket.userId, action, tableId, {
+      potSize:   preState?.pot || 0,
+      stackSize: mySeat?.stack || 0,
+      isPreflop: preState?.phase === 'preflop',
+    });
     if (acOk === false) { socket.emit('error', { message: 'Action rate limited' }); return; }
 
     const result = tableManager.handleAction(tableId, socket.id, action, amount);
