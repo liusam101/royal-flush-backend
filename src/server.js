@@ -1602,11 +1602,42 @@ setInterval(async () => {
   }
 }, 60000);
 
-// Stream anti-cheat alerts to admin room in real time
+// Stream anti-cheat alerts to admin room in real time, and auto-eject on
+// the small set of DETERMINISTIC ban-match signals.
+//
+// Auto-enforcement is deliberately narrow: only the three ban-lookup types
+// below take automatic action. Every other alert type — COLLUSION_*,
+// CHIP_DUMP_*, SOLVER_*, BOT_*, RTA_*, GHOSTING_*, MULTI_ACCOUNT_*,
+// SAME_IP_SAME_TABLE, CHAT_* — is STATISTICAL and will produce false
+// positives (fingerprint collisions, fast-but-human timing, legitimate
+// same-household IP sharing, etc.). Those stay ADVISORY / human-review-only
+// by design. Do not add to AUTO_EJECT_TYPES without discussion; punishing
+// innocent players over a heuristic is a worse outcome than the cheating.
+const AUTO_EJECT_TYPES = new Set(['BANNED_DEVICE','BAN_EVASION_IP','BAN_EVASION_NAME']);
+
 antiCheat.on('alert', (alert) => {
   io.to('admin').emit('acAlert', alert);
   if (alert.severity >= antiCheat.SEV.HIGH) {
     console.warn(`[AntiCheat] ${alert.severityName} — ${alert.type}: ${alert.detail}`);
+  }
+
+  if (AUTO_EJECT_TYPES.has(alert.type)) {
+    // Prefer the socketIds carried on the alert (refactor #1); fall back to
+    // resolving via userSockets if a hand-loaded alert lacks them.
+    let socks = Array.isArray(alert.socketIds) ? [...alert.socketIds] : [];
+    if (socks.length === 0 && alert.userId != null) {
+      const live = io.sockets.sockets;
+      for (const s of live.values()) {
+        if (s.userId != null && String(s.userId) === String(alert.userId)) socks.push(s.id);
+      }
+    }
+    for (const sid of socks) {
+      io.to(sid).emit('kicked', { reason: 'Account banned' });
+      const { affected } = tableManager.removePlayer(sid);
+      affected?.forEach(tid => io.to(tid).emit('tableState', tableManager.getTableState(tid)));
+      io.sockets.sockets.get(sid)?.disconnect(true);
+    }
+    if (socks.length) console.warn(`[AntiCheat] AUTO-EJECT ${alert.type} — ${socks.length} socket(s)`);
   }
 });
 

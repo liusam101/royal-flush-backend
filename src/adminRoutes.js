@@ -6,6 +6,7 @@ const router  = express.Router();
 const { tableManager }       = require('./tableManager');
 const { tournamentEngine }   = require('./tournamentEngine');
 const { antiCheat }          = require('./antiCheat');
+const db                     = require('./db');
 
 const { ADMIN_SECRET } = require('./config');
 
@@ -168,7 +169,32 @@ router.post('/anticheat/ban', auth, async (req, res) => {
     if (type === 'ip')   await antiCheat.banIP(value, reason);
     if (type === 'name') await antiCheat.banName(value, reason);
     if (type === 'fp')   await antiCheat.banFP(value, reason);
-    res.json({ ok: true, banned: { type, value, reason } });
+
+    // If banning by name and an account row exists, flag it. IP/fp bans are
+    // trivially evadable (VPN, new browser); the account flag is not. auth.js
+    // (login + verifyTokenAsync) already rejects users with banned=true.
+    if (type === 'name' && db.getPool()) {
+      try {
+        await db.query(`UPDATE users SET banned = true WHERE LOWER(username) = $1`,
+                       [String(value).toLowerCase()]);
+      } catch (e) { console.error('[AntiCheat] users.banned update failed:', e.message); }
+    }
+
+    // Eject any live session currently matching the ban — otherwise the
+    // player keeps playing until their next reconnect.
+    let ejected = 0;
+    try {
+      const socks = antiCheat.socketsMatchingBan(type, value);
+      for (const sid of socks) {
+        req.io?.to(sid).emit('kicked', { reason: 'Account banned' });
+        const { affected } = tableManager.removePlayer(sid);
+        affected?.forEach(tid => req.io?.to(tid).emit('tableState', tableManager.getTableState(tid)));
+        req.io?.sockets?.sockets?.get(sid)?.disconnect(true);
+        ejected++;
+      }
+    } catch (e) { console.error('[AntiCheat] ban ejection failed:', e.message); }
+
+    res.json({ ok: true, banned: { type, value, reason }, ejected });
   } catch (e) {
     res.status(500).json({ error: 'ban persist failed', detail: e.message });
   }

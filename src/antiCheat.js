@@ -788,6 +788,30 @@ antiCheat.getDashboard = () => {
   };
 };
 
+// Returns live socketIds currently matching a ban value, for immediate
+// ejection when an admin bans someone who is already connected/seated.
+// Reads only from the live-connection maps and socket→user bridge — this is
+// a look-up, not a heuristic, so it's safe to hand straight to a kick path.
+antiCheat.socketsMatchingBan = (type, value) => {
+  const out = new Set();
+  if (type === 'ip') {
+    for (const [sid, uid] of Object.entries(socketToUser)) {
+      if (sessions[uid]?.ip === value) out.add(sid);
+    }
+    if (ipMap[value]) for (const sid of ipMap[value]) out.add(sid);
+  } else if (type === 'name') {
+    const lc = String(value).toLowerCase();
+    for (const [uid, s] of Object.entries(sessions)) {
+      if ((s.name||'').toLowerCase() === lc) {
+        for (const sid of (userSockets[uid]||[])) out.add(sid);
+      }
+    }
+  } else if (type === 'fp') {
+    if (fpMap[value]) for (const sid of fpMap[value]) out.add(sid);
+  }
+  return [...out];
+};
+
 antiCheat.SEV = SEV;
 
 module.exports = { antiCheat };
