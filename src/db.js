@@ -219,6 +219,39 @@ async function initDB() {
       CREATE INDEX IF NOT EXISTS idx_tournaments_start_time ON tournaments(start_time);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_tournaments_template_start
         ON tournaments(template_id, start_time) WHERE template_id IS NOT NULL;
+
+      -- Anti-cheat: durable ban list. Replaces the JSON-file store that lived
+      -- on Railway's ephemeral /tmp and was wiped on every deploy.
+      CREATE TABLE IF NOT EXISTS ac_bans (
+        id         SERIAL PRIMARY KEY,
+        ban_type   TEXT NOT NULL,          -- 'ip' | 'name' | 'fp'
+        value      TEXT NOT NULL,          -- ip / lowercased name / fingerprint
+        reason     TEXT,
+        created_at TIMESTAMPTZ DEFAULT now(),
+        UNIQUE (ban_type, value)
+      );
+
+      -- Anti-cheat: durable alert history for the admin review workflow.
+      -- user_id matches users.id (TEXT). Alerts are keyed by their existing
+      -- generated id string. ts is kept as ms epoch to match runtime code.
+      CREATE TABLE IF NOT EXISTS ac_alerts (
+        id            TEXT PRIMARY KEY,
+        user_id       TEXT,
+        player_name   TEXT,
+        type          TEXT NOT NULL,
+        severity      INT NOT NULL,
+        severity_name TEXT,
+        detail        TEXT,
+        data          JSONB,
+        reviewed      BOOLEAN DEFAULT FALSE,
+        action        TEXT,
+        admin_note    TEXT,
+        ts            BIGINT NOT NULL,
+        created_at    TIMESTAMPTZ DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_ac_alerts_user     ON ac_alerts(user_id);
+      CREATE INDEX IF NOT EXISTS idx_ac_alerts_reviewed ON ac_alerts(reviewed);
+      CREATE INDEX IF NOT EXISTS idx_ac_alerts_severity ON ac_alerts(severity);
     `);
     console.log('[DB] Tables ready');
     return true;

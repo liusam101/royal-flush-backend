@@ -14,35 +14,30 @@
 // and every other entry point is a graceful no-op.
 // ══════════════════════════════════════════════════════════════════════════
 const EventEmitter = require('events');
-const fs   = require('fs');
-const path = require('path');
+const db = require('./db');
 
 const SEV = { LOW:1, MEDIUM:2, HIGH:3, CRITICAL:4 };
 const SEV_NAMES = {1:'LOW',2:'MEDIUM',3:'HIGH',4:'CRITICAL'};
 
 // ── Ban persistence ────────────────────────────────────────────────────────
-const DATA_DIR  = process.env.RAILWAY_ENVIRONMENT
-  ? path.join('/tmp', 'rfdata')
-  : path.join(__dirname, '../../data');
-const BANS_FILE = path.join(DATA_DIR, 'bans.json');
-try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch(_) {}
-
-function _loadBans() {
+// Bans are stored in Postgres (ac_bans) — the previous JSON-file store lived
+// on Railway's ephemeral /tmp and was wiped on every deploy, giving cheaters
+// an easy reset. In-memory Sets stay as the hot lookup path; DB is the
+// durable backing store with write-through on ban/unban and a loader on
+// boot (see loadBansFromDB below).
+async function _persistBan(type, value, reason) {
+  if (!db.getPool()) return;
   try {
-    const d = JSON.parse(fs.readFileSync(BANS_FILE, 'utf8'));
-    return { ips: new Set(d.ips||[]), names: new Set(d.names||[]), fps: new Set(d.fps||[]) };
-  } catch(_) {
-    return { ips: new Set(), names: new Set(), fps: new Set() };
-  }
+    await db.query(
+      `INSERT INTO ac_bans (ban_type, value, reason) VALUES ($1,$2,$3)
+       ON CONFLICT (ban_type, value) DO NOTHING`, [type, value, reason]);
+  } catch (e) { console.error('[AntiCheat] persistBan failed:', e.message); }
 }
-function _saveBans() {
+async function _removeBan(type, value) {
+  if (!db.getPool()) return;
   try {
-    fs.writeFileSync(BANS_FILE, JSON.stringify({
-      ips:   [...bannedIPs],
-      names: [...bannedNames],
-      fps:   [...bannedFPs],
-    }, null, 2));
-  } catch(e) { console.error('[AntiCheat] saveBans failed:', e.message); }
+    await db.query(`DELETE FROM ac_bans WHERE ban_type=$1 AND value=$2`, [type, value]);
+  } catch (e) { console.error('[AntiCheat] removeBan failed:', e.message); }
 }
 
 // ── Storage ────────────────────────────────────────────────────────────────
@@ -69,7 +64,10 @@ const fpMap          = {};   // fingerprint → Set<socketId>
 const socketToUser   = {};   // socketId → userId
 const userSockets    = {};   // userId → Set<socketId>
 
-const { ips: bannedIPs, names: bannedNames, fps: bannedFPs } = _loadBans();
+// Sets start empty; loadBansFromDB fills them at boot.
+const bannedIPs   = new Set();
+const bannedNames = new Set();
+const bannedFPs   = new Set();
 
 // ── Session defaults ───────────────────────────────────────────────────────
 // Only creates a session for an authenticated userId. Guests get null and
@@ -126,6 +124,18 @@ function alert(userId, type, severity, detail, data={}) {
   flagged[userId].push(a);
   if (flagged[userId].length > 100) flagged[userId].shift();
   if (sess) sess.suspicionScore += severity * 10;
+
+  // Write-behind to DB. Alerts are high-volume and non-critical-path — never
+  // await, never let a DB failure escape into detection code.
+  if (db.getPool()) {
+    db.query(
+      `INSERT INTO ac_alerts (id,user_id,player_name,type,severity,severity_name,detail,data,reviewed,ts)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING`,
+      [a.id, userId != null ? String(userId) : null, a.playerName, a.type, a.severity,
+       a.severityName, a.detail, JSON.stringify(a.data||{}), false, a.ts]
+    ).catch(e => console.error('[AntiCheat] alert insert failed:', e.message));
+  }
+
   antiCheat.emit('alert', a);
   return a;
 }
@@ -634,12 +644,77 @@ antiCheat.setPlayerStack = (socketId, userId, stack) => {
   if (sess) sess.currentStack = stack;
 };
 
-// Admin controls
-antiCheat.banIP     = ip   => { bannedIPs.add(ip);                     _saveBans(); };
-antiCheat.banName   = name => { bannedNames.add(name.toLowerCase());   _saveBans(); };
-antiCheat.banFP     = fp   => { bannedFPs.add(fp);                     _saveBans(); };
-antiCheat.unbanIP   = ip   => { bannedIPs.delete(ip);                  _saveBans(); };
-antiCheat.unbanName = name => { bannedNames.delete(name.toLowerCase()); _saveBans(); };
+// Admin controls — write-through to Postgres. All async now; every caller
+// must await.
+antiCheat.banIP = async (ip, reason='') => {
+  bannedIPs.add(ip);
+  await _persistBan('ip', ip, reason);
+};
+antiCheat.banName = async (name, reason='') => {
+  const n = name.toLowerCase();
+  bannedNames.add(n);
+  await _persistBan('name', n, reason);
+};
+antiCheat.banFP = async (fp, reason='') => {
+  bannedFPs.add(fp);
+  await _persistBan('fp', fp, reason);
+};
+antiCheat.unbanIP = async (ip) => {
+  bannedIPs.delete(ip);
+  await _removeBan('ip', ip);
+};
+antiCheat.unbanName = async (name) => {
+  const n = name.toLowerCase();
+  bannedNames.delete(n);
+  await _removeBan('name', n);
+};
+antiCheat.unbanFP = async (fp) => {
+  bannedFPs.delete(fp);
+  await _removeBan('fp', fp);
+};
+
+// Boot loader — populate Sets from ac_bans. Called from server.js after
+// initAuth/initDB. Silent no-op if DB is not configured.
+antiCheat.loadBansFromDB = async () => {
+  if (!db.getPool()) return;
+  try {
+    const rows = await db.query(`SELECT ban_type, value FROM ac_bans`);
+    for (const r of rows) {
+      if (r.ban_type === 'ip')   bannedIPs.add(r.value);
+      if (r.ban_type === 'name') bannedNames.add(r.value);
+      if (r.ban_type === 'fp')   bannedFPs.add(r.value);
+    }
+    console.log(`[AntiCheat] Loaded ${rows.length} bans from DB.`);
+  } catch (e) { console.error('[AntiCheat] loadBans failed:', e.message); }
+};
+
+// Boot loader — repopulate `flagged` with recent unreviewed alerts so the
+// admin console isn't blank after a restart. Bounded to 7 days / 5000 rows.
+antiCheat.loadAlertsFromDB = async () => {
+  if (!db.getPool()) return;
+  try {
+    const rows = await db.query(
+      `SELECT * FROM ac_alerts WHERE reviewed=false AND ts > $1 ORDER BY ts DESC LIMIT 5000`,
+      [Date.now() - 7*24*3600*1000]);
+    for (const r of rows) {
+      const uid = r.user_id;
+      const a = {
+        id: r.id, socketIds: [], userId: uid, playerName: r.player_name,
+        type: r.type, severity: r.severity, severityName: r.severity_name,
+        detail: r.detail, data: r.data || {}, ts: Number(r.ts),
+        reviewed: r.reviewed, action: r.action, adminNote: r.admin_note,
+      };
+      if (!flagged[uid]) flagged[uid] = [];
+      flagged[uid].push(a);
+    }
+    // Match runtime ordering (oldest→newest) and re-apply the 100-cap.
+    for (const uid of Object.keys(flagged)) {
+      flagged[uid].sort((x,y)=>x.ts-y.ts);
+      if (flagged[uid].length > 100) flagged[uid] = flagged[uid].slice(-100);
+    }
+    console.log(`[AntiCheat] Loaded ${rows.length} unreviewed alerts from DB.`);
+  } catch (e) { console.error('[AntiCheat] loadAlerts failed:', e.message); }
+};
 
 antiCheat.getAlerts = ({minSeverity=1, unreviewed=false, userId=null, type=null}={}) => {
   let all = Object.values(flagged).flat();
@@ -652,7 +727,19 @@ antiCheat.getAlerts = ({minSeverity=1, unreviewed=false, userId=null, type=null}
 antiCheat.reviewAlert = (alertId, action, note='') => {
   for (const arr of Object.values(flagged)) {
     const a = arr.find(x=>x.id===alertId);
-    if (a) { a.reviewed=true; a.action=action; a.adminNote=note; return a; }
+    if (a) {
+      a.reviewed = true; a.action = action; a.adminNote = note;
+      // Write-through — durably mark reviewed. Fire-and-forget: the admin
+      // UI already has the response; a failed persist is a log line, not an
+      // error to the reviewer.
+      if (db.getPool()) {
+        db.query(
+          `UPDATE ac_alerts SET reviewed=true, action=$1, admin_note=$2 WHERE id=$3`,
+          [action, note, alertId]
+        ).catch(e => console.error('[AntiCheat] reviewAlert persist failed:', e.message));
+      }
+      return a;
+    }
   }
   return null;
 };

@@ -2010,6 +2010,10 @@ const { initAuth } = require('./auth');
 const PORT = process.env.PORT || 3001;
 initAuth().then(async () => {
   await _loadAssetsFromDB();
+  // Anti-cheat durable state (bans + recent unreviewed alerts). initAuth
+  // runs db.initDB() first so ac_bans/ac_alerts already exist here.
+  await antiCheat.loadBansFromDB();
+  await antiCheat.loadAlertsFromDB();
   await generateUpcomingTournaments();      // create instance rows from templates
   await hydratePersistentTournaments();      // load pre-start tournaments into memory
   await recoverOrphanedTournamentEntries();  // refund or restore ledger entries

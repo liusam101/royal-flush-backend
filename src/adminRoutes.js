@@ -162,18 +162,28 @@ router.post('/anticheat/alerts/:alertId/review', auth, (req, res) => {
   res.json({ ok: true, alert });
 });
 
-router.post('/anticheat/ban', auth, (req, res) => {
-  const { type, value, reason } = req.body; // type: 'ip'|'name'
-  if (type === 'ip')   antiCheat.banIP(value);
-  if (type === 'name') antiCheat.banName(value);
-  res.json({ ok: true, banned: { type, value, reason } });
+router.post('/anticheat/ban', auth, async (req, res) => {
+  const { type, value, reason } = req.body; // type: 'ip'|'name'|'fp'
+  try {
+    if (type === 'ip')   await antiCheat.banIP(value, reason);
+    if (type === 'name') await antiCheat.banName(value, reason);
+    if (type === 'fp')   await antiCheat.banFP(value, reason);
+    res.json({ ok: true, banned: { type, value, reason } });
+  } catch (e) {
+    res.status(500).json({ error: 'ban persist failed', detail: e.message });
+  }
 });
 
-router.delete('/anticheat/ban', auth, (req, res) => {
+router.delete('/anticheat/ban', auth, async (req, res) => {
   const { type, value } = req.body;
-  if (type === 'ip')   antiCheat.unbanIP(value);
-  if (type === 'name') antiCheat.unbanName(value);
-  res.json({ ok: true });
+  try {
+    if (type === 'ip')   await antiCheat.unbanIP(value);
+    if (type === 'name') await antiCheat.unbanName(value);
+    if (type === 'fp')   await antiCheat.unbanFP(value);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'unban persist failed', detail: e.message });
+  }
 });
 
 module.exports = router;
