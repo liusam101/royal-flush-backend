@@ -362,7 +362,7 @@ async function _performLeave(sock, tableId) {
   const returnedStack = leaveResult?.stack || 0;
 
   sock.leave(tableId);
-  antiCheat.onLeaveTable(sock.id);
+  antiCheat.onLeaveTable(sock.id, sock.userId);
   if (sock.userId) rg.endSession(sock.userId).catch(() => {});
   io.to(tableId).emit('tableState', tableManager.getTableState(tableId));
   io.emit('tableListUpdated');
@@ -660,7 +660,7 @@ io.on('connection', async (socket) => {
     const fp = socket.handshake.auth?.fingerprint
            || data.fingerprint
            || null;
-    const acCheck = antiCheat.onConnect(socket.id, playerName, ip, fp);
+    const acCheck = antiCheat.onConnect(socket.id, socket.userId, playerName, ip, fp);
     if (acCheck.blocked) {
       socket.emit('error', { message: 'Access denied: ' + acCheck.reason });
       console.warn(`[AntiCheat] BLOCKED ${playerName} from ${ip}: ${acCheck.reason}`);
@@ -735,7 +735,7 @@ io.on('connection', async (socket) => {
     io.emit('tableListUpdated');  // refresh lobby player counts for all clients
 
     const seats = tableManager.getTableState(tableId)?.seats || [];
-    antiCheat.onJoinTable(socket.id, tableId, seats.map(s=>({socketId:s.socketId||s.seat})));
+    antiCheat.onJoinTable(socket.id, socket.userId, tableId, seats.map(s=>({socketId:s.socketId||s.seat, name:s.name})));
 
     if (currentState?.phase === 'preflop' && !result.willStartHand) {
       const myCards = tableManager.getPlayerCards(tableId).find(p=>p.socketId===socket.id);
@@ -756,7 +756,7 @@ io.on('connection', async (socket) => {
   socket.on('playerAction', async ({ tableId, action, amount, signals }) => {
     const preState = tableManager.getTableState(tableId);
     const mySeat   = preState?.seats?.find(s => s.socketId === socket.id);
-    const acOk = antiCheat.onAction(socket.id, action, tableId, {
+    const acOk = antiCheat.onAction(socket.id, socket.userId, action, tableId, {
       potSize:   preState?.pot || 0,
       stackSize: mySeat?.stack || 0,
       isPreflop: preState?.phase === 'preflop',
@@ -766,8 +766,9 @@ io.on('connection', async (socket) => {
       const sigResult = analyzeInteractionSignature(signals);
       if (sigResult.botScore > 0.7) {
         antiCheat.emit('alert', {
-          id: `${socket.id}-sig-${Date.now()}`,
-          socketId: socket.id,
+          id: `${String(socket.userId ?? socket.id).slice(-6)}-sig-${Date.now()}`,
+          userId: socket.userId,
+          socketIds: [socket.id],
           playerName: sessions[socket.id]?.name || mySeat?.name || '?',
           type: 'BOT_INTERACTION_SIGNATURE',
           severity: sigResult.botScore > 0.85 ? 3 : 2,
@@ -778,7 +779,7 @@ io.on('connection', async (socket) => {
         });
       }
     }
-    if (mySeat) antiCheat.setPlayerStack(socket.id, mySeat.stack);
+    if (mySeat) antiCheat.setPlayerStack(socket.id, socket.userId, mySeat.stack);
     handHistory.recordAction(tableId, mySeat?.name || '?', action, amount, preState);
 
     const result = tableManager.handleAction(tableId, socket.id, action, amount);
@@ -793,10 +794,20 @@ io.on('connection', async (socket) => {
       if (hr?.winner) {
         const winnerSeat = preState?.seats?.find(s=>s.name===hr.winner);
         const loserSeats = preState?.seats?.filter(s=>s.name!==hr.winner&&!s.folded);
+        // Resolve winner/loser userIds from the live socket registry so
+        // anti-cheat accumulation keys on the authenticated account, not
+        // the per-connection socketId. Seats don't carry userId.
+        const winnerUserId = winnerSeat?.socketId
+          ? io.sockets.sockets.get(winnerSeat.socketId)?.userId
+          : undefined;
         loserSeats?.forEach(loser => {
+          const loserUserId = loser?.socketId
+            ? io.sockets.sockets.get(loser.socketId)?.userId
+            : undefined;
           antiCheat.onHandResult(tableId, {
             winner: hr.winner, loser: loser.name,
             winnerSocket: winnerSeat?.socketId, loserSocket: loser.socketId,
+            winnerUserId, loserUserId,
             amount: hr.amount || 0,
             isShowdown,
           });
@@ -884,7 +895,7 @@ io.on('connection', async (socket) => {
     if (!socket.rooms.has(tableId)) return;
     // Use authenticated username if available, fall back to provided name
     const from = socket.username || playerName;
-    antiCheat.onChat(socket.id, message);
+    antiCheat.onChat(socket.id, socket.userId, message);
     io.to(tableId).emit('chatMessage', { from, message: message.slice(0, 200), ts: now });
   });
 
@@ -1267,7 +1278,8 @@ io.on('connection', async (socket) => {
     }
     const tableId = player.tableId;
 
-    const acOk = antiCheat.onAction(socket.id, action, tableId);
+    // SNG path currently passes no ctx (that's refactor #4); add userId now.
+    const acOk = antiCheat.onAction(socket.id, socket.userId, action, tableId);
     if (acOk === false) { socket.emit('error', { message: 'Action rate limited' }); return; }
 
     const result = tableManager.handleAction(tableId, socket.id, action, amount);
@@ -1451,8 +1463,8 @@ io.on('connection', async (socket) => {
     _chatLastTs.delete(socket.id);
     _pendingLeaves.delete(socket.id);
     _pendingSitOuts.delete(socket.id);
-    antiCheat.onLeaveTable(socket.id);
-    antiCheat.onDisconnect(socket.id);
+    antiCheat.onLeaveTable(socket.id, socket.userId);
+    antiCheat.onDisconnect(socket.id, socket.userId);
 
     // Mark as sitting-out instead of removing immediately — folds current turn if needed.
     // Returns { affected, handResults } so we can emit any hands that ended as a result.
@@ -2005,4 +2017,3 @@ initAuth().then(async () => {
   setInterval(() => tournamentStatusTick().catch(e => console.error('[TournTick]', e.message)), 30 * 1000);
   server.listen(PORT, () => console.log(`Royal Flush backend :${PORT}`));
 });
-

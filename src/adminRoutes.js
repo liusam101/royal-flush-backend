@@ -143,15 +143,16 @@ router.get('/anticheat', auth, (req, res) => {
 });
 
 router.get('/anticheat/alerts', auth, (req, res) => {
-  const { severity=1, unreviewed } = req.query;
+  const { severity=1, unreviewed, userId } = req.query;
   res.json(antiCheat.getAlerts({
     minSeverity: parseInt(severity),
     unreviewed: unreviewed === 'true',
+    userId: userId || null,
   }));
 });
 
-router.get('/anticheat/player/:socketId', auth, (req, res) => {
-  res.json(antiCheat.getPlayerReport(req.params.socketId));
+router.get('/anticheat/player/:userId', auth, (req, res) => {
+  res.json(antiCheat.getPlayerReport(req.params.userId));
 });
 
 router.post('/anticheat/alerts/:alertId/review', auth, (req, res) => {
