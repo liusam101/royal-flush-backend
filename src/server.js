@@ -559,9 +559,8 @@ const _pendingSitOuts = new Map();
 // Per-table set of socketIds that have already taken a voluntary preflop
 // action this hand. Reset at every hand start; cleared on table teardown.
 // Used to compute ctx.isFirstAction for the anti-cheat VPIP/PFR counters —
-// works for BOTH cash and SNG paths since handHistory.recordAction is only
-// wired on the cash path. Blinds are posted by tableManager (not through
-// playerAction/sngAction), so they don't populate this set — correct.
+// works for BOTH cash and SNG paths. Blinds are posted by tableManager (not
+// through playerAction/sngAction), so they don't populate this set — correct.
 const _preflopActors = new Map();
 function _markPreflopActed(tableId, socketId, phase) {
   const isPreflop = phase === 'preflop';
@@ -1310,6 +1309,10 @@ io.on('connection', async (socket) => {
       isFirstAction: _markPreflopActed(tableId, socket.id, preState?.phase),
     });
     if (acOk === false) { socket.emit('error', { message: 'Action rate limited' }); return; }
+
+    // Mirror the cash-path recordAction so onHandComplete's actions[] is
+    // populated for tournament hands too (collusion detectors need it).
+    handHistory.recordAction(tableId, mySeat?.name || '?', action, amount, preState);
 
     const result = tableManager.handleAction(tableId, socket.id, action, amount);
     if (!result.ok) { socket.emit('error', { message: result.error }); return; }

@@ -360,6 +360,27 @@ function checkChipDump(loserUserId, winnerUserId, winnerName, amount, loserStack
     alert(loserUserId, 'CHIP_DUMP_PATTERN', SEV.HIGH,
       `Lost to ${winnerName} ${recentToSame.length}× in 1hr ($${hourTotal.toFixed(0)} total)`,
       { winner: winnerName, winnerUserId, count: recentToSame.length, total: hourTotal });
+
+    // Directional-consistency escalation. Real chip-dumping is one-way
+    // (A always loses to B, never the reverse). Two regulars playing each
+    // other will have flow going both directions and shouldn't escalate.
+    // Uses collusionGraph LIFETIME totals — that's intentionally broader
+    // than the 1-hour pattern window, so a coincidental short-run one-way
+    // loss doesn't trigger unless the long-run pattern also skews one way.
+    if (winnerUserId != null) {
+      const forward = collusionGraph[winnerUserId]?.wins?.[loserUserId]   || 0; // loser→winner
+      const reverse = collusionGraph[winnerUserId]?.losses?.[loserUserId] || 0; // winner→loser
+      const oneWay = reverse === 0
+        ? forward >= 100
+        : (forward / reverse >= 5 && forward >= 100);
+      if (oneWay) {
+        alert(loserUserId, 'CHIP_DUMP_DIRECTIONAL', SEV.HIGH,
+          `One-way flow to ${winnerName}: $${forward.toFixed(0)} sent lifetime, only $${reverse.toFixed(0)} back`,
+          { winner: winnerName, winnerUserId,
+            forward, reverse,
+            ratio: reverse > 0 ? Number((forward/reverse).toFixed(2)) : null });
+      }
+    }
   }
   if (loserStack > 0 && amount / loserStack >= DUMP_STACK_PCT && amount >= DUMP_MIN_POT) {
     alert(loserUserId, 'CHIP_DUMP_LARGE', SEV.MEDIUM,
@@ -390,17 +411,29 @@ function checkGhosting(userId, elapsed, potSize, stackSize) {
 // flagged as sharing an IP with itself.
 // ══════════════════════════════════════════════════════════════════════════
 function checkIPCollision(tableId, seats) {
+  // Both maps dedupe by userId — a single user with two tabs = two sockets,
+  // one userId. Must NEVER self-flag as multi-account.
   const ipGroups = {}; // ip → Map<userId, { userId, name }>
+  const fpGroups = {}; // fingerprint → Map<userId, { userId, name }>
   for (const seat of seats) {
     const userId = socketToUser[seat.socketId];
-    if (userId == null) continue; // guest — no session to check IP against
-    const ip = sessions[userId]?.ip;
-    if (!ip) continue;
-    if (!ipGroups[ip]) ipGroups[ip] = new Map();
-    if (!ipGroups[ip].has(userId)) {
-      ipGroups[ip].set(userId, { userId, name: seat.name || sessions[userId]?.name });
+    if (userId == null) continue;
+    const sess = sessions[userId];
+    const ip = sess?.ip;
+    const fp = sess?.fingerprint;
+    const nm = seat.name || sess?.name;
+    if (ip) {
+      if (!ipGroups[ip]) ipGroups[ip] = new Map();
+      if (!ipGroups[ip].has(userId)) ipGroups[ip].set(userId, { userId, name: nm });
+    }
+    if (fp) {
+      if (!fpGroups[fp]) fpGroups[fp] = new Map();
+      if (!fpGroups[fp].has(userId)) fpGroups[fp].set(userId, { userId, name: nm });
     }
   }
+
+  // Existing HIGH signal: two distinct userIds at one table sharing an IP.
+  // Households legitimately share IPs — advisory only.
   for (const [ip, byUser] of Object.entries(ipGroups)) {
     if (byUser.size >= 2) {
       const users = [...byUser.values()];
@@ -409,6 +442,41 @@ function checkIPCollision(tableId, seats) {
           `${users.length} players at ${tableId} share IP ${ip}: ${users.map(x=>x.name).join(', ')}`,
           { ip, players: users.map(x=>x.name), userIds: users.map(x=>x.userId), tableId })
       );
+    }
+  }
+
+  // Fingerprint at the same table is stronger than IP alone — fp collisions
+  // are much rarer than IP sharing. Still advisory (browser fingerprints CAN
+  // collide, e.g. two family members with identical devices in stealth mode).
+  for (const [fp, byUser] of Object.entries(fpGroups)) {
+    if (byUser.size >= 2) {
+      const users = [...byUser.values()];
+      users.forEach(u =>
+        alert(u.userId, 'DEVICE_SAME_TABLE', SEV.HIGH,
+          `${users.length} players at ${tableId} share device fingerprint: ${users.map(x=>x.name).join(', ')}`,
+          { fingerprint: fp.slice(0,20), players: users.map(x=>x.name), userIds: users.map(x=>x.userId), tableId })
+      );
+    }
+  }
+
+  // fp+IP intersection: the SAME set of 2+ distinct userIds sharing BOTH IP
+  // and fingerprint at the same table is close to deterministic multi-
+  // accounting. Still advisory (NOT in AUTO_EJECT_TYPES — a wrong CRITICAL
+  // here would eject an innocent), routed to priority review.
+  for (const [ip, ipUsers] of Object.entries(ipGroups)) {
+    if (ipUsers.size < 2) continue;
+    for (const [fp, fpUsers] of Object.entries(fpGroups)) {
+      if (fpUsers.size < 2) continue;
+      const intersect = [...ipUsers.keys()].filter(uid => fpUsers.has(uid));
+      if (intersect.length >= 2) {
+        const users = intersect.map(uid => ipUsers.get(uid));
+        users.forEach(u =>
+          alert(u.userId, 'MULTI_ACCOUNT_SAME_TABLE', SEV.CRITICAL,
+            `${users.length} accounts at ${tableId} share BOTH IP ${ip} AND device fingerprint: ${users.map(x=>x.name).join(', ')}`,
+            { ip, fingerprint: fp.slice(0,20), players: users.map(x=>x.name),
+              userIds: users.map(x=>x.userId), tableId })
+        );
+      }
     }
   }
 }
@@ -588,7 +656,9 @@ antiCheat.onHandResult = (tableId, handData) => {
   const winnerSess = winnerUserId != null ? sessions[winnerUserId] : null;
   if (winnerSess) {
     winnerSess.totalWon += amount;
-    winnerSess.handsPlayed++;
+    // handsPlayed and totalHands are counted once-per-hand in onHandComplete
+    // (which fires exactly once per hand) — NOT here, because onHandResult is
+    // called once per loser and would over-count the winner by (#losers).
     if (isShowdown) { winnerSess.showdownWins++; winnerSess.showdownTotal++; }
   }
   if (loserSess && isShowdown) loserSess.showdownTotal++;
@@ -844,6 +914,25 @@ antiCheat.onHandComplete = (tableId, record) => {
 
   const nameToUser = _resolveTableNames(tableId);
 
+  // Resolve THIS hand's seats (not "all currently known sessions", which is
+  // what the earlier stub did). record.seats is populated by handHistory at
+  // hand-start with the actual seated players.
+  const handSeatNames = Array.isArray(record.seats)
+    ? record.seats.map(s => s?.name).filter(Boolean)
+    : [];
+  const handSeatUids  = [...new Set(handSeatNames.map(n => nameToUser[n]).filter(Boolean))];
+
+  // Per-hand participation counters. Increment once per participating userId,
+  // regardless of how many losers were in the hand — this is the ONLY site
+  // that touches totalHands/handsPlayed to avoid double counting via
+  // onHandResult's per-loser loop.
+  for (const uid of handSeatUids) {
+    const s = sessions[uid];
+    if (!s) continue;
+    s.totalHands  = (s.totalHands  || 0) + 1;
+    s.handsPlayed = (s.handsPlayed || 0) + 1;
+  }
+
   // Store only what a pairing analyzer needs, not the whole record.
   const slim = {
     handId:  record.handId,
@@ -859,7 +948,7 @@ antiCheat.onHandComplete = (tableId, record) => {
       amount: a.amount || 0,
       phase:  a.phase,
     })),
-    seats: Object.values(nameToUser),
+    seats: handSeatUids,
   };
 
   if (!recentHands[tableId]) recentHands[tableId] = [];
@@ -870,7 +959,7 @@ antiCheat.onHandComplete = (tableId, record) => {
   const keys = Object.keys(recentHands);
   if (keys.length > MAX_TABLES) delete recentHands[keys[0]];
 
-  // #4c/#4d detectors will be invoked from here. No-op for now.
+  // #4d detectors (multi-hand pairing) will be invoked from here.
 };
 
 // Called from server.js at every tableManager.removeTable(tid) site.
