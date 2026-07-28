@@ -64,6 +64,14 @@ const fpMap          = {};   // fingerprint → Set<socketId>
 const socketToUser   = {};   // socketId → userId
 const userSockets    = {};   // userId → Set<socketId>
 
+// Per-table ring of recent completed hands, for the multi-hand pairing
+// analysis in the collusion detectors added in #4c/#4d. Populated by
+// onHandComplete, cleared per-table by onTableRemoved (fallback cap at
+// MAX_TABLES to bound growth if a teardown ever leaks).
+const recentHands  = {};     // tableId → [slimHand, ...]
+const HANDS_RING   = 60;     // hands retained per table
+const MAX_TABLES   = 500;    // safety cap on distinct tables in the ring
+
 // Sets start empty; loadBansFromDB fills them at boot.
 const bannedIPs   = new Set();
 const bannedNames = new Set();
@@ -810,6 +818,64 @@ antiCheat.socketsMatchingBan = (type, value) => {
     if (fpMap[value]) for (const sid of fpMap[value]) out.add(sid);
   }
   return [...out];
+};
+
+// Best-effort display-name → userId map for players in a table's most
+// recent hand. antiCheat doesn't import tableManager, so this reverse-maps
+// through the global sessions store (which is keyed by userId and carries
+// the latest known display name). Limitations: two users with the same
+// display name would collide, and a user who has fully left the session
+// pool won't resolve. Detectors in #4c/#4d that need table-accurate
+// resolution should have the server pass the actual seat list.
+function _resolveTableNames(_tableId) {
+  const map = {};
+  for (const [uid, s] of Object.entries(sessions)) {
+    if (s?.name) map[s.name] = uid;
+  }
+  return map;
+}
+
+// Called once per completed hand with the FULL hand record from
+// handHistory, including record.actions[] = [{ts, player, action, amount,
+// pot, phase}, ...]. #4c/#4d detectors will read from the recentHands
+// ring; here we just accumulate the minimum needed. No detection yet.
+antiCheat.onHandComplete = (tableId, record) => {
+  if (!record || !Array.isArray(record.actions)) return;
+
+  const nameToUser = _resolveTableNames(tableId);
+
+  // Store only what a pairing analyzer needs, not the whole record.
+  const slim = {
+    handId:  record.handId,
+    ts:      record.endTs || Date.now(),
+    winner:  record.winner,
+    amount:  record.amount || 0,
+    reason:  record.reason,
+    showdown: (record.reason === 'showdown'),
+    actions: record.actions.map(a => ({
+      user:   nameToUser[a.player] || null,
+      name:   a.player,
+      action: a.action,
+      amount: a.amount || 0,
+      phase:  a.phase,
+    })),
+    seats: Object.values(nameToUser),
+  };
+
+  if (!recentHands[tableId]) recentHands[tableId] = [];
+  recentHands[tableId].push(slim);
+  if (recentHands[tableId].length > HANDS_RING) recentHands[tableId].shift();
+
+  // Fallback bound if a teardown ever leaks: drop the oldest table entry.
+  const keys = Object.keys(recentHands);
+  if (keys.length > MAX_TABLES) delete recentHands[keys[0]];
+
+  // #4c/#4d detectors will be invoked from here. No-op for now.
+};
+
+// Called from server.js at every tableManager.removeTable(tid) site.
+antiCheat.onTableRemoved = (tableId) => {
+  delete recentHands[tableId];
 };
 
 antiCheat.SEV = SEV;

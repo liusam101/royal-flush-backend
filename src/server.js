@@ -370,7 +370,8 @@ async function _performLeave(sock, tableId) {
   if (leaveResult?.handResult) {
     const hr = leaveResult.handResult;
     io.to(tableId).emit('handResult', hr);
-    handHistory.endHand(tableId, hr);
+    const _rec = handHistory.endHand(tableId, hr);
+    if (_rec) antiCheat.onHandComplete(tableId, _rec);
     try { await settleHandChips(tableId, hr, 'fold'); }
     catch(e) { console.error(`[Settle] failed for ${tableId}:`, e.message); }
     setTimeout(() => tryStartNewHand(tableId), 3500);
@@ -440,6 +441,7 @@ function tryStartNewHand(tableId) {
   io.to(tableId).emit('tableState', newState);
   dealCardsToAll(tableId);
   handHistory.startHand(tableId, newState.seats||[], { sb: newState.sb, bb: newState.bb });
+  _preflopActors.delete(tableId); // reset first-action tracking for the new hand
   // If any seat is a bot, run the bot loop (harmless for cash tables — bots aren't seated there)
   if (newState.seats?.some(s => s.socketId?.startsWith('bot_'))) {
     const tournId = tableId.split('_table')[0];
@@ -553,6 +555,22 @@ const _pendingLeaves = new Map();
 // Deferred sit-out requests — socketId → { tableId }. Applied before the next
 // deal so the player finishes their current hand normally, then sits out.
 const _pendingSitOuts = new Map();
+
+// Per-table set of socketIds that have already taken a voluntary preflop
+// action this hand. Reset at every hand start; cleared on table teardown.
+// Used to compute ctx.isFirstAction for the anti-cheat VPIP/PFR counters —
+// works for BOTH cash and SNG paths since handHistory.recordAction is only
+// wired on the cash path. Blinds are posted by tableManager (not through
+// playerAction/sngAction), so they don't populate this set — correct.
+const _preflopActors = new Map();
+function _markPreflopActed(tableId, socketId, phase) {
+  const isPreflop = phase === 'preflop';
+  let acted = _preflopActors.get(tableId);
+  if (!acted) { acted = new Set(); _preflopActors.set(tableId, acted); }
+  const isFirst = isPreflop && !acted.has(socketId);
+  if (isPreflop) acted.add(socketId);
+  return isFirst;
+}
 
 // Session name cache for interaction sig alerts (must be declared before main connection handler)
 const sessions = {};
@@ -760,6 +778,7 @@ io.on('connection', async (socket) => {
       potSize:   preState?.pot || 0,
       stackSize: mySeat?.stack || 0,
       isPreflop: preState?.phase === 'preflop',
+      isFirstAction: _markPreflopActed(tableId, socket.id, preState?.phase),
     });
     if (acOk === false) { socket.emit('error',{message:'Action rate limited'}); return; }
     if (signals) {
@@ -814,7 +833,8 @@ io.on('connection', async (socket) => {
         });
       }
       io.to(tableId).emit('handResult', hr);
-      handHistory.endHand(tableId, hr);
+      const _rec = handHistory.endHand(tableId, hr);
+      if (_rec) antiCheat.onHandComplete(tableId, _rec);
       try { await settleHandChips(tableId, hr, 'showdown'); }
       catch(e) { console.error(`[Settle] failed for ${tableId}:`, e.message); }
       setTimeout(() => tryStartNewHand(tableId), 3500);
@@ -1287,6 +1307,7 @@ io.on('connection', async (socket) => {
       potSize:   preState?.pot || 0,
       stackSize: mySeat?.stack || 0,
       isPreflop: preState?.phase === 'preflop',
+      isFirstAction: _markPreflopActed(tableId, socket.id, preState?.phase),
     });
     if (acOk === false) { socket.emit('error', { message: 'Action rate limited' }); return; }
 
@@ -1421,6 +1442,8 @@ io.on('connection', async (socket) => {
     // Remove any tableManager tables belonging to this tournament
     Object.keys(tourn.tables || {}).forEach(tid => {
       try { tableManager.removeTable(tid); } catch(_) {}
+      antiCheat.onTableRemoved(tid);
+      _preflopActors.delete(tid);
     });
     await _cancelAndRefundTournament(tourn, 'admin_cancel');
     io.emit('tournState', tournamentEngine.getState(tournId));
@@ -1482,7 +1505,8 @@ io.on('connection', async (socket) => {
     // Emit and settle any hand that ended because of the immediate fold
     for (const { tableId, handResult: hr } of handResults) {
       io.to(tableId).emit('handResult', hr);
-      handHistory.endHand(tableId, hr);
+      const _rec = handHistory.endHand(tableId, hr);
+      if (_rec) antiCheat.onHandComplete(tableId, _rec);
       try { await settleHandChips(tableId, hr, 'fold'); }
       catch(e) { console.error(`[Settle] failed for ${tableId}:`, e.message); }
       setTimeout(() => tryStartNewHand(tableId), 3500);
@@ -1567,7 +1591,8 @@ io.on('connection', async (socket) => {
       if (result?.handOver && result?.handResult) {
         const hr = result.handResult;
         io.to(tid).emit('handResult', hr);
-        handHistory.endHand(tid, hr);
+        const _rec = handHistory.endHand(tid, hr);
+        if (_rec) antiCheat.onHandComplete(tid, _rec);
         try { await settleHandChips(tid, hr, 'fold'); }
         catch(e) { console.error(`[Settle] failed for ${tid}:`, e.message); }
         setTimeout(() => tryStartNewHand(tid), 3500);
@@ -1859,6 +1884,8 @@ async function _processTournHandOver(tableId, tournId, result) {
     io.to('tourn_' + tournId).emit('sngResult', { results: updatedTourn.results });
     await dbQuery(`UPDATE tournaments SET status='finished', updated_at=now() WHERE id=$1`, [tournId]).catch(()=>{});
     tableManager.removeTable(tableId);
+    antiCheat.onTableRemoved(tableId);
+    _preflopActors.delete(tableId);
   } else {
     // Table balancing: check if any players need to move between tables. Runs between hands.
     _applyTableBalancing(tournId);
@@ -1938,6 +1965,8 @@ async function _cancelAndRefundTournament(tourn, reason) {
   if (tourn.blindTimer) { clearInterval(tourn.blindTimer); tourn.blindTimer = null; }
   Object.keys(tourn.tables || {}).forEach(tid => {
     try { tableManager.removeTable(tid); } catch(_) {}
+    antiCheat.onTableRemoved(tid);
+    _preflopActors.delete(tid);
   });
   try {
     await withTransaction(async (client) => {
