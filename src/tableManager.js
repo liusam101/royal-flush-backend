@@ -438,12 +438,17 @@ const tableManager = {
       const remainder = roundMoney(net - share * winSeats.length);
       if (remainder > 0 && winSeats[0]) winSeats[0].stack += remainder;
       const showCards = active.map(s => ({ name: s.name, cards: s.cards }));
-      const handResult = { winner: result.winner, winners: result.winners, hand: result.hand, amount: net, rake, board: t.board, showCards };
+      const handResult = { winner: result.winner, winners: result.winners, hand: result.hand, amount: net, rake, board: t.board, showCards, strengths: result.strengths };
       this._resetHand(tableId);
       return handResult;
     }
 
-    // Multiple side pots (each pot split among tied winners at that level)
+    // Multiple side pots. Each pot's showdown() only covers its eligible
+    // subset, so no single per-pot call reports every active player's hand.
+    // Run one extra showdown() up front purely to harvest strengths for the
+    // whole active set — cheap, and showdown() is pure so it's safe.
+    const overallStrengths = t.engine.showdown(active, t.board).strengths;
+
     let lastWinner = null, lastHand = null, lastAmount = 0;
     for (const sp of sidePots) {
       const eligible = sp.eligible.map(i => t.seats[i]).filter(s => !s.folded && s.cards && s.cards.length >= 2);
@@ -470,6 +475,7 @@ const tableManager = {
       sidePots: allResults,
       board: t.board,
       showCards: showCards2,
+      strengths: overallStrengths,
     };
     this._resetHand(tableId);
     return handResult;

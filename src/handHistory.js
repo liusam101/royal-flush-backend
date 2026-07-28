@@ -76,6 +76,9 @@ function endHand(tableId, result) {
     showCards:result?.showCards || [],
     finalBoard: result?.board?.map(c=>c.r+c.s) || hand.board,
     reason:   result?.reason,
+    // Per-active-player showdown strength: [{name, handName, rank}, ...].
+    // Absent on fold-win / last-player results — that's correct.
+    strengths: result?.strengths || null,
   };
 
   // Write to disk

@@ -949,6 +949,16 @@ antiCheat.onHandComplete = (tableId, record) => {
       phase:  a.phase,
     })),
     seats: handSeatUids,
+    // Per-userId showdown strength map. Absent (null) on fold-win hands
+    // (record.strengths is only set by _doShowdown). rank is scoreHand.tier
+    // (0=High Card … 9=Royal Flush).
+    strengthByUser: Array.isArray(record.strengths)
+      ? record.strengths.reduce((m, s) => {
+          const uid = nameToUser[s.name];
+          if (uid) m[uid] = { rank: s.rank, handName: s.handName };
+          return m;
+        }, {})
+      : null,
   };
 
   if (!recentHands[tableId]) recentHands[tableId] = [];

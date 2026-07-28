@@ -92,10 +92,14 @@ class GameEngine {
   showdown(seats, board) {
     const active = seats.filter(s => !s.folded);
     let winners = [], winScore = null;
+    // Capture each seat's score once so we can expose per-player strength
+    // downstream WITHOUT re-running bestFive per seat.
+    const scoreByName = new Map();
 
     for (const seat of active) {
       const seven  = [...seat.cards, ...board];
       const result = bestFive(seven);
+      scoreByName.set(seat.name, result.score);
       const cmp = winScore ? compareScore(result.score, winScore) : 1;
       if (cmp > 0) {
         winners  = [seat];
@@ -105,10 +109,19 @@ class GameEngine {
       }
     }
 
+    // Per-active-player strength for the anti-cheat pipeline. `rank` reuses
+    // scoreHand's existing `tier` (0=High Card … 9=Royal Flush) — a coarse
+    // category ordinal that ignores kickers, which is what detectors want.
+    const strengths = active.map(seat => {
+      const sc = scoreByName.get(seat.name);
+      return { name: seat.name, handName: sc?.name, rank: sc?.tier ?? 0 };
+    });
+
     return {
       winner:  winners[0]?.name,
       winners: winners.map(s => s.name),
       hand:    winScore?.name,
+      strengths,
     };
   }
 }
