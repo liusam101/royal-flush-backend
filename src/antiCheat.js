@@ -72,6 +72,12 @@ const recentHands  = {};     // tableId → [slimHand, ...]
 const HANDS_RING   = 60;     // hands retained per table
 const MAX_TABLES   = 500;    // safety cap on distinct tables in the ring
 
+// Per-pair collusion accumulators (#4d). Keyed by canonical unordered pair
+// key "uidA|uidB" (sorted). Growth bounded by MAX_PAIRS with oldest-first
+// eviction.
+const pairStats  = {};       // "uidA|uidB" → accumulator
+const MAX_PAIRS  = 5000;     // safety cap on tracked pairs
+
 // Sets start empty; loadBansFromDB fills them at boot.
 const bannedIPs   = new Set();
 const bannedNames = new Set();
@@ -969,8 +975,179 @@ antiCheat.onHandComplete = (tableId, record) => {
   const keys = Object.keys(recentHands);
   if (keys.length > MAX_TABLES) delete recentHands[keys[0]];
 
-  // #4d detectors (multi-hand pairing) will be invoked from here.
+  // #4d — multi-hand pairing detectors (soft-play, whipsaw). Each pair of
+  // seated userIds this hand gets shared/soft-play/whipsaw evidence updated.
+  const uids = (slim.seats || []).filter(Boolean);
+  for (let i = 0; i < uids.length; i++) {
+    for (let j = i + 1; j < uids.length; j++) {
+      const pair = _getPair(uids[i], uids[j]);
+      pair.sharedHands++;
+      pair.lastHandTs = slim.ts;
+      _evalSoftplay(pair, uids[i], uids[j], slim);
+      _evalWhipsaw(pair, uids[i], uids[j], slim, uids);
+    }
+  }
 };
+
+// ══════════════════════════════════════════════════════════════════════════
+// DETECTION 11 — Soft-play & Whipsaw (per-pair, multi-hand, advisory)
+// ══════════════════════════════════════════════════════════════════════════
+// Conservative posture: thresholds deliberately HIGH to protect the review
+// queue. Tunable — loosen against real data after observing false-positive
+// rate. Neither SOFTPLAY_PAIR nor WHIPSAW_PAIR is (or should be) added to
+// AUTO_EJECT_TYPES — both are advisory review prompts, not convictions.
+const STRONG_RANK        = 2;    // scoreHand.tier >= 2 (Two Pair+) counts as "strong"
+const SOFTPLAY_MIN_SHARED = 25;  // need >=25 shared hands before soft-play can flag
+const SOFTPLAY_MIN_STRONG = 6;   // >=6 strong-hand soft-play events between the pair
+const SOFTPLAY_RATE       = 0.55; // AND softplayStrong/strongShowdownsTogether >= 55%
+const WHIPSAW_MIN_SHARED  = 25;
+const WHIPSAW_MIN_EVENTS  = 5;   // >=5 whipsaw-signature hands vs third parties
+
+function _pairKey(a, b) { return [String(a), String(b)].sort().join('|'); }
+function _getPair(a, b) {
+  const k = _pairKey(a, b);
+  if (!pairStats[k]) {
+    pairStats[k] = {
+      key: k, a: String(a), b: String(b),
+      sharedHands: 0,
+      softplayEvents: 0,             // hands showing the soft-play signature
+      softplayStrong: 0,             // soft-play events where BOTH held strong hands
+      strongShowdownsTogether: 0,    // rate denominator (both strong at showdown, regardless of aggression)
+      whipsawEvents: 0,              // hands showing the whipsaw signature vs a third party
+      lastHandTs: 0,
+      flaggedSoftplay: false,
+      flaggedWhipsaw:  false,
+    };
+    _capPairs();
+  }
+  return pairStats[k];
+}
+// Evict the pair with the oldest lastHandTs when we exceed MAX_PAIRS.
+function _capPairs() {
+  const keys = Object.keys(pairStats);
+  if (keys.length <= MAX_PAIRS) return;
+  let oldestKey = null, oldestTs = Infinity;
+  for (const k of keys) {
+    const ts = pairStats[k].lastHandTs || 0;
+    if (ts < oldestTs) { oldestTs = ts; oldestKey = k; }
+  }
+  if (oldestKey) delete pairStats[oldestKey];
+}
+
+// Soft-play: both users showed down together AND neither bet/raised on any
+// street the other also acted on. Escalates when the strong-hand version
+// dominates their strong-showdown-together sample.
+function _evalSoftplay(pair, a, b, slim) {
+  const strengths = slim.strengthByUser;
+  if (!strengths || !strengths[a] || !strengths[b]) return; // both must have showed down
+
+  const acts = Array.isArray(slim.actions) ? slim.actions : [];
+  // Per-phase per-user summary. `bet`/`raise` counts as aggression; `fold`
+  // marks the user as no-longer-contesting on subsequent streets.
+  const byPhase = {};
+  for (const act of acts) {
+    if (act.user !== a && act.user !== b) continue;
+    const p = act.phase || 'preflop';
+    if (!byPhase[p]) byPhase[p] = { a:{acted:false, aggro:false}, b:{acted:false, aggro:false} };
+    const side = act.user === a ? byPhase[p].a : byPhase[p].b;
+    side.acted = true;
+    if (act.action === 'bet' || act.action === 'raise') side.aggro = true;
+  }
+
+  // If EITHER user was aggressive on a street the OTHER also acted on, this
+  // is aggression between them — not a soft-play signature.
+  let aggressionBetween = false;
+  for (const p of Object.keys(byPhase)) {
+    const { a:aa, b:bb } = byPhase[p];
+    if (aa.acted && bb.acted && (aa.aggro || bb.aggro)) { aggressionBetween = true; break; }
+  }
+
+  const bothStrong = strengths[a].rank >= STRONG_RANK && strengths[b].rank >= STRONG_RANK;
+  // Denominator: hands where both showed down strong, regardless of aggression.
+  if (bothStrong) pair.strongShowdownsTogether++;
+
+  if (aggressionBetween) return; // not a soft-play event
+  pair.softplayEvents++;
+  if (bothStrong) pair.softplayStrong++;
+
+  const rate = pair.softplayStrong / Math.max(pair.strongShowdownsTogether, 1);
+  if (!pair.flaggedSoftplay
+      && pair.sharedHands >= SOFTPLAY_MIN_SHARED
+      && pair.softplayStrong >= SOFTPLAY_MIN_STRONG
+      && rate >= SOFTPLAY_RATE) {
+    pair.flaggedSoftplay = true;
+    const detail = `Soft-play pattern: ${pair.softplayStrong}/${pair.strongShowdownsTogether} strong showdowns together had no aggression between them (${(rate*100).toFixed(0)}%) across ${pair.sharedHands} shared hands`;
+    const data = { partnerA: pair.a, partnerB: pair.b,
+      sharedHands: pair.sharedHands, softplayEvents: pair.softplayEvents,
+      softplayStrong: pair.softplayStrong,
+      strongShowdownsTogether: pair.strongShowdownsTogether,
+      rate: Number(rate.toFixed(3)) };
+    alert(a, 'SOFTPLAY_PAIR', SEV.MEDIUM, detail, data);
+    alert(b, 'SOFTPLAY_PAIR', SEV.MEDIUM, detail, data);
+  }
+}
+
+// Whipsaw: on a single street, A raises then B re-raises (or vice versa)
+// with a third player C caught between them. Coolers (both A/B holding
+// strong hands at showdown) are excluded — the trap requires at least one
+// of the pair holding a non-strong hand.
+function _evalWhipsaw(pair, a, b, slim, uids) {
+  if (!uids || uids.length < 3) return; // need a third party
+  const acts = Array.isArray(slim.actions) ? slim.actions : [];
+  if (acts.length < 3) return;
+
+  // Group acts by phase preserving in-phase order.
+  const perPhase = {};
+  for (const act of acts) {
+    const p = act.phase || 'preflop';
+    if (!perPhase[p]) perPhase[p] = [];
+    perPhase[p].push(act);
+  }
+
+  const isAggro = act => act.action === 'bet' || act.action === 'raise';
+
+  let sandwich = false;
+  for (const seq of Object.values(perPhase)) {
+    // Walk: find X in {a,b} with aggressive action, then a C-action (C is
+    // another userId, not a or b) later in the same phase, then a Y in
+    // {a,b} with Y != X aggressive after that.
+    for (let i = 0; i < seq.length && !sandwich; i++) {
+      const x = seq[i];
+      if (!isAggro(x)) continue;
+      if (x.user !== a && x.user !== b) continue;
+      const other = x.user === a ? b : a;
+      let sawC = false;
+      for (let j = i + 1; j < seq.length; j++) {
+        const y = seq[j];
+        if (!y.user) continue;
+        if (y.user !== a && y.user !== b) { sawC = true; continue; }
+        if (sawC && y.user === other && isAggro(y)) { sandwich = true; break; }
+      }
+    }
+    if (sandwich) break;
+  }
+  if (!sandwich) return;
+
+  // Cooler filter: skip if both partners showed down strong.
+  const strengths = slim.strengthByUser;
+  const rankA = strengths?.[a]?.rank;
+  const rankB = strengths?.[b]?.rank;
+  const bothStrong = rankA >= STRONG_RANK && rankB >= STRONG_RANK;
+  if (bothStrong) return; // likely legit cooler, not whipsaw
+
+  pair.whipsawEvents++;
+
+  if (!pair.flaggedWhipsaw
+      && pair.sharedHands >= WHIPSAW_MIN_SHARED
+      && pair.whipsawEvents >= WHIPSAW_MIN_EVENTS) {
+    pair.flaggedWhipsaw = true;
+    const detail = `Whipsaw pattern: ${pair.whipsawEvents} sandwich raises around a third player across ${pair.sharedHands} shared hands`;
+    const data = { partnerA: pair.a, partnerB: pair.b,
+      sharedHands: pair.sharedHands, whipsawEvents: pair.whipsawEvents };
+    alert(a, 'WHIPSAW_PAIR', SEV.MEDIUM, detail, data);
+    alert(b, 'WHIPSAW_PAIR', SEV.MEDIUM, detail, data);
+  }
+}
 
 // Called from server.js at every tableManager.removeTable(tid) site.
 antiCheat.onTableRemoved = (tableId) => {
